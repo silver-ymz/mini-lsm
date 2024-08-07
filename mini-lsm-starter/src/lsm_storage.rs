@@ -15,6 +15,7 @@ use crate::compact::{
     CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
+use crate::iterators::merge_iterator::MergeIterator;
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
 use crate::mem_table::MemTable;
@@ -120,7 +121,7 @@ pub enum CompactionFilter {
 
 /// The storage interface of the LSM tree.
 pub(crate) struct LsmStorageInner {
-    pub(crate) state: Arc<RwLock<Arc<LsmStorageState>>>,
+    pub(crate) state: Arc<RwLock<LsmStorageState>>,
     pub(crate) state_lock: Mutex<()>,
     path: PathBuf,
     pub(crate) block_cache: Arc<BlockCache>,
@@ -253,7 +254,7 @@ impl LsmStorageInner {
         };
 
         let storage = Self {
-            state: Arc::new(RwLock::new(Arc::new(state))),
+            state: Arc::new(RwLock::new(state)),
             state_lock: Mutex::new(()),
             path: path.to_path_buf(),
             block_cache: Arc::new(BlockCache::new(1024)),
@@ -278,8 +279,25 @@ impl LsmStorageInner {
     }
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
-    pub fn get(&self, _key: &[u8]) -> Result<Option<Bytes>> {
-        unimplemented!()
+    pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
+        let state = self.state.read();
+        if let Some(value) = state.memtable.get(key) {
+            if value.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(value));
+        }
+
+        for memtable in &state.imm_memtables {
+            if let Some(value) = memtable.get(key) {
+                if value.is_empty() {
+                    return Ok(None);
+                }
+                return Ok(Some(value));
+            }
+        }
+
+        Ok(None)
     }
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
@@ -288,13 +306,24 @@ impl LsmStorageInner {
     }
 
     /// Put a key-value pair into the storage by writing into the current memtable.
-    pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        unimplemented!()
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        let state = self.state.read();
+        state.memtable.put(key, value)?;
+        let approximate_size = state.memtable.approximate_size();
+        drop(state);
+        if approximate_size >= self.options.target_sst_size {
+            let state_lock = self.state_lock.lock();
+            let approximate_size = self.state.read().memtable.approximate_size();
+            if approximate_size >= self.options.target_sst_size {
+                self.force_freeze_memtable(&state_lock)?;
+            }
+        }
+        Ok(())
     }
 
     /// Remove a key from the storage by writing an empty value.
-    pub fn delete(&self, _key: &[u8]) -> Result<()> {
-        unimplemented!()
+    pub fn delete(&self, key: &[u8]) -> Result<()> {
+        self.put(key, &[])
     }
 
     pub(crate) fn path_of_sst_static(path: impl AsRef<Path>, id: usize) -> PathBuf {
@@ -319,7 +348,13 @@ impl LsmStorageInner {
 
     /// Force freeze the current memtable to an immutable memtable
     pub fn force_freeze_memtable(&self, _state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
-        unimplemented!()
+        let new_memtable = Arc::new(MemTable::create(self.next_sst_id()));
+        {
+            let mut state = self.state.write();
+            let old_memtable = std::mem::replace(&mut state.memtable, new_memtable);
+            state.imm_memtables.insert(0, old_memtable);
+        }
+        Ok(())
     }
 
     /// Force flush the earliest-created immutable memtable to disk
@@ -335,9 +370,18 @@ impl LsmStorageInner {
     /// Create an iterator over a range of keys.
     pub fn scan(
         &self,
-        _lower: Bound<&[u8]>,
-        _upper: Bound<&[u8]>,
+        lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
     ) -> Result<FusedIterator<LsmIterator>> {
-        unimplemented!()
+        let mut iters = Vec::new();
+        let state = self.state.read();
+        iters.push(Box::new(state.memtable.scan(lower, upper)));
+        for imm_memtable in &state.imm_memtables {
+            iters.push(Box::new(imm_memtable.scan(lower, upper)));
+        }
+
+        Ok(FusedIterator::new(LsmIterator::new(
+            MergeIterator::create(iters),
+        )?))
     }
 }

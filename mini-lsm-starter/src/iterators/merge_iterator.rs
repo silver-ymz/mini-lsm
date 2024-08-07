@@ -1,7 +1,5 @@
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use std::cmp::{self};
+use std::collections::binary_heap::PeekMut;
 use std::collections::BinaryHeap;
 
 use anyhow::Result;
@@ -45,7 +43,17 @@ pub struct MergeIterator<I: StorageIterator> {
 
 impl<I: StorageIterator> MergeIterator<I> {
     pub fn create(iters: Vec<Box<I>>) -> Self {
-        unimplemented!()
+        let mut heap = BinaryHeap::new();
+        for (i, iter) in iters.into_iter().enumerate() {
+            if iter.is_valid() {
+                heap.push(HeapWrapper(i, iter));
+            }
+        }
+        let current = heap.pop();
+        MergeIterator {
+            iters: heap,
+            current,
+        }
     }
 }
 
@@ -55,18 +63,65 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
     type KeyType<'a> = KeySlice<'a>;
 
     fn key(&self) -> KeySlice {
-        unimplemented!()
+        self.current.as_ref().unwrap().1.key()
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        self.current.as_ref().unwrap().1.value()
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        self.current.is_some()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        let mut errs = vec![];
+        let mut current = self.current.take().unwrap();
+        let key = current.1.key().raw_ref().to_vec();
+        if let Err(e) = current.1.next() {
+            errs.push(e);
+        } else if current.1.is_valid() {
+            self.iters.push(current);
+        }
+
+        while let Some(mut p) = self.iters.peek_mut() {
+            if p.1.key().raw_ref() != key {
+                break;
+            }
+            while p.1.key().raw_ref() == key {
+                if let Err(e) = p.1.next() {
+                    PeekMut::pop(p);
+                    errs.push(e);
+                    break;
+                }
+                if !p.1.is_valid() {
+                    PeekMut::pop(p);
+                    break;
+                }
+            }
+        }
+
+        self.current = self.iters.pop();
+        if errs.is_empty() {
+            Ok(())
+        } else {
+            Err(MergeIteratorError(errs).into())
+        }
     }
 }
+
+#[derive(Debug)]
+struct MergeIteratorError(pub Vec<anyhow::Error>);
+
+impl std::fmt::Display for MergeIteratorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "MergeIteratorError (size {}):", self.0.len())?;
+        for e in &self.0 {
+            e.fmt(f)?;
+            writeln!(f)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for MergeIteratorError {}

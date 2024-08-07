@@ -1,11 +1,7 @@
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use std::sync::Arc;
 
-use crate::key::{KeySlice, KeyVec};
-
 use super::Block;
+use crate::key::{KeySlice, KeyVec};
 
 /// Iterates on a block.
 pub struct BlockIterator {
@@ -34,44 +30,90 @@ impl BlockIterator {
 
     /// Creates a block iterator and seek to the first entry.
     pub fn create_and_seek_to_first(block: Arc<Block>) -> Self {
-        unimplemented!()
+        let mut iter = Self::new(block);
+        iter.seek_to_first();
+        iter
     }
 
     /// Creates a block iterator and seek to the first key that >= `key`.
     pub fn create_and_seek_to_key(block: Arc<Block>, key: KeySlice) -> Self {
-        unimplemented!()
+        let mut iter = Self::new(block);
+        iter.seek_to_key(key);
+        iter
     }
 
     /// Returns the key of the current entry.
     pub fn key(&self) -> KeySlice {
-        unimplemented!()
+        self.key.as_key_slice()
     }
 
     /// Returns the value of the current entry.
     pub fn value(&self) -> &[u8] {
-        unimplemented!()
+        &self.block.data[self.value_range.0..self.value_range.1]
     }
 
     /// Returns true if the iterator is valid.
     /// Note: You may want to make use of `key`
     pub fn is_valid(&self) -> bool {
-        unimplemented!()
+        !self.key.is_empty()
     }
 
     /// Seeks to the first key in the block.
     pub fn seek_to_first(&mut self) {
-        unimplemented!()
+        self.seek_to_index(0)
     }
 
     /// Move to the next key in the block.
     pub fn next(&mut self) {
-        unimplemented!()
+        if self.idx + 1 < self.block.offsets.len() {
+            self.idx += 1;
+            self.seek_to_index(self.idx);
+        } else {
+            self.key = KeyVec::new();
+        }
     }
 
     /// Seek to the first key that >= `key`.
     /// Note: You should assume the key-value pairs in the block are sorted when being added by
     /// callers.
     pub fn seek_to_key(&mut self, key: KeySlice) {
-        unimplemented!()
+        let mut left = 0;
+        let mut right = self.block.offsets.len();
+        let x = key.raw_ref();
+        while left < right {
+            let mid = (left + right) / 2;
+            let offset = self.block.offsets[mid] as usize;
+            let data = &self.block.data[offset..];
+            let (key_len, data) = data.split_first_chunk::<2>().unwrap();
+            let key_len = u16::from_le_bytes(*key_len);
+            let (key, _) = data.split_at(key_len as usize);
+            if key >= x {
+                right = mid;
+            } else {
+                left = mid + 1;
+            }
+        }
+        if left != self.block.offsets.len() {
+            self.seek_to_index(left);
+        }
+    }
+
+    fn seek_to_index(&mut self, idx: usize) {
+        let offset = self.block.offsets[idx] as usize;
+        let data = &self.block.data[offset..];
+
+        let (key_len, data) = data.split_first_chunk::<2>().unwrap();
+        let key_len = u16::from_le_bytes(*key_len);
+        let (key, data) = data.split_at(key_len as usize);
+        self.key.set_from_slice(KeySlice::from_slice(key));
+
+        let (value_len, _) = data.split_first_chunk::<2>().unwrap();
+        let value_len = u16::from_le_bytes(*value_len);
+        let value_begin = offset + key_len as usize + 4;
+        let value_end = value_begin + value_len as usize;
+        self.value_range = (value_begin, value_end);
+
+        self.idx = idx;
+        self.first_key = self.key.clone();
     }
 }

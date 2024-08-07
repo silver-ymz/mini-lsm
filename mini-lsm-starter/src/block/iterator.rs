@@ -13,8 +13,6 @@ pub struct BlockIterator {
     value_range: (usize, usize),
     /// Current index of the key-value pair, should be in range of [0, num_of_elements)
     idx: usize,
-    /// The first key in the block
-    first_key: KeyVec,
 }
 
 impl BlockIterator {
@@ -24,7 +22,6 @@ impl BlockIterator {
             key: KeyVec::new(),
             value_range: (0, 0),
             idx: 0,
-            first_key: KeyVec::new(),
         }
     }
 
@@ -95,6 +92,8 @@ impl BlockIterator {
         }
         if left != self.block.offsets.len() {
             self.seek_to_index(left);
+        } else {
+            self.key = KeyVec::new();
         }
     }
 
@@ -114,6 +113,5 @@ impl BlockIterator {
         self.value_range = (value_begin, value_end);
 
         self.idx = idx;
-        self.first_key = self.key.clone();
     }
 }

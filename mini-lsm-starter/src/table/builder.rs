@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use bytes::Bytes;
 
-use super::{BlockMeta, FileObject, SsTable};
+use super::{bloom::Bloom, BlockMeta, FileObject, SsTable};
 use crate::{
     block::BlockBuilder,
     key::{Key, KeySlice},
@@ -21,6 +21,7 @@ pub struct SsTableBuilder {
     last_key: Vec<u8>,
     data: Vec<u8>,
     pub(crate) meta: Vec<BlockMeta>,
+    key_hashes: Vec<u32>,
     block_size: usize,
 }
 
@@ -33,6 +34,7 @@ impl SsTableBuilder {
             last_key: Vec::new(),
             data: Vec::new(),
             meta: Vec::new(),
+            key_hashes: Vec::new(),
             block_size,
         }
     }
@@ -42,6 +44,7 @@ impl SsTableBuilder {
     /// Note: You should split a new block when the current block is full.(`std::mem::replace` may
     /// be helpful here)
     pub fn add(&mut self, key: KeySlice, value: &[u8]) {
+        self.key_hashes.push(farmhash::fingerprint32(key.raw_ref()));
         if self.first_key.is_empty() {
             self.first_key.extend_from_slice(key.raw_ref());
             self.last_key.extend_from_slice(key.raw_ref());
@@ -81,6 +84,12 @@ impl SsTableBuilder {
         BlockMeta::encode_block_meta(&self.meta, &mut data);
         data.extend_from_slice(&block_meta_offset.to_le_bytes());
 
+        let bloom_offset = data.len();
+        let bloom_bits = Bloom::bloom_bits_per_key(self.key_hashes.len(), 0.01);
+        let bloom = Bloom::build_from_key_hashes(&self.key_hashes, bloom_bits);
+        bloom.encode(&mut data);
+        data.extend_from_slice(&bloom_offset.to_le_bytes());
+
         let file = FileObject::create(path.as_ref(), data)?;
         let first_key = self
             .meta
@@ -90,6 +99,7 @@ impl SsTableBuilder {
             .meta
             .last()
             .map_or(Key::from_bytes(Bytes::new()), |m| m.last_key.clone());
+
         Ok(SsTable {
             file,
             block_meta: self.meta,
@@ -98,7 +108,7 @@ impl SsTableBuilder {
             block_cache,
             first_key,
             last_key,
-            bloom: None,
+            bloom: Some(bloom),
             max_ts: 0,
         })
     }

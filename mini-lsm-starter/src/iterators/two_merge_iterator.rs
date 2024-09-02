@@ -66,4 +66,8 @@ impl<
         self.prefer_a = !self.b.is_valid() || (self.a.is_valid() && self.a.key() <= self.b.key());
         Ok(())
     }
+
+    fn num_active_iterators(&self) -> usize {
+        self.a.num_active_iterators() + self.b.num_active_iterators()
+    }
 }

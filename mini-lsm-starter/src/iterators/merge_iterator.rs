@@ -108,6 +108,17 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
             Err(MergeIteratorError(errs).into())
         }
     }
+
+    fn num_active_iterators(&self) -> usize {
+        let mut num = 0;
+        if let Some(current) = &self.current {
+            num += current.1.num_active_iterators();
+        }
+        for iter in self.iters.iter() {
+            num += iter.1.num_active_iterators();
+        }
+        num
+    }
 }
 
 #[derive(Debug)]

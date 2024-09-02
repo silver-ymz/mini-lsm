@@ -23,7 +23,7 @@ use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
 use crate::mem_table::{map_bound, MemTable};
 use crate::mvcc::LsmMvccInner;
-use crate::table::{SsTable, SsTableIterator};
+use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -158,7 +158,17 @@ impl Drop for MiniLsm {
 
 impl MiniLsm {
     pub fn close(&self) -> Result<()> {
-        unimplemented!()
+        self.compaction_notifier.send(())?;
+        if let Some(h) = self.compaction_thread.lock().take() {
+            h.join()
+                .map_err(|_| anyhow::anyhow!("Compaction thread panicked"))?;
+        }
+        self.flush_notifier.send(())?;
+        if let Some(h) = self.flush_thread.lock().take() {
+            h.join()
+                .map_err(|_| anyhow::anyhow!("Flush thread panicked"))?;
+        }
+        Ok(())
     }
 
     /// Start the storage engine by either loading an existing directory or creating a new one if the directory does
@@ -241,6 +251,9 @@ impl LsmStorageInner {
     /// not exist.
     pub(crate) fn open(path: impl AsRef<Path>, options: LsmStorageOptions) -> Result<Self> {
         let path = path.as_ref();
+        if !path.exists() {
+            std::fs::create_dir_all(path)?;
+        }
         let state = LsmStorageState::create(&options);
 
         let compaction_controller = match &options.compaction_options {
@@ -310,6 +323,9 @@ impl LsmStorageInner {
                 .sstables
                 .get(&sst_id)
                 .ok_or(anyhow::anyhow!("SSTable not found"))?;
+            if !key_within(sst, key) {
+                continue;
+            }
             let iter = SsTableIterator::create_and_seek_to_key(sst.clone(), Key::from_slice(key))?;
             sstable_iters.push(Box::new(iter));
         }
@@ -383,7 +399,31 @@ impl LsmStorageInner {
 
     /// Force flush the earliest-created immutable memtable to disk
     pub fn force_flush_next_imm_memtable(&self) -> Result<()> {
-        unimplemented!()
+        let _state_lock = self.state_lock.lock();
+
+        let imm_memtable = {
+            let guard = self.state.read();
+            guard
+                .imm_memtables
+                .last()
+                .ok_or(anyhow::anyhow!("No imm memtable"))?
+                .clone()
+        };
+
+        let sst_id = self.next_sst_id();
+        let sst_path = self.path_of_sst(sst_id);
+        let mut sst_builder = SsTableBuilder::new(self.options.block_size);
+        imm_memtable.flush(&mut sst_builder)?;
+        let sstable = sst_builder.build(sst_id, Some(self.block_cache.clone()), sst_path)?;
+
+        let mut guard = self.state.write();
+        let mut state = guard.as_ref().clone();
+        state.imm_memtables.pop();
+        state.sstables.insert(sst_id, Arc::new(sstable));
+        state.l0_sstables.insert(0, sst_id);
+        *guard = Arc::new(state);
+
+        Ok(())
     }
 
     pub fn new_txn(&self) -> Result<()> {
@@ -414,6 +454,9 @@ impl LsmStorageInner {
                 .sstables
                 .get(&sst_id)
                 .ok_or(anyhow::anyhow!("SSTable not found"))?;
+            if !range_overlap(sst, lower, upper) {
+                continue;
+            }
             let iter = match lower {
                 Bound::Included(lower) => {
                     SsTableIterator::create_and_seek_to_key(sst.clone(), Key::from_slice(lower))?
@@ -441,4 +484,20 @@ impl LsmStorageInner {
             map_bound(upper),
         )?))
     }
+}
+
+fn range_overlap(sst: &SsTable, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> bool {
+    (match lower {
+        Bound::Included(lower) => sst.last_key().raw_ref() >= lower,
+        Bound::Excluded(lower) => sst.last_key().raw_ref() > lower,
+        Bound::Unbounded => true,
+    }) && (match upper {
+        Bound::Included(upper) => sst.first_key().raw_ref() <= upper,
+        Bound::Excluded(upper) => sst.first_key().raw_ref() < upper,
+        Bound::Unbounded => true,
+    })
+}
+
+fn key_within(sst: &SsTable, key: &[u8]) -> bool {
+    sst.first_key().raw_ref() <= key && sst.last_key().raw_ref() >= key
 }

@@ -10,7 +10,7 @@ use super::StorageIterator;
 pub struct TwoMergeIterator<A: StorageIterator, B: StorageIterator> {
     a: A,
     b: B,
-    // Add fields as need
+    prefer_a: bool,
 }
 
 impl<
@@ -19,7 +19,8 @@ impl<
     > TwoMergeIterator<A, B>
 {
     pub fn create(a: A, b: B) -> Result<Self> {
-        unimplemented!()
+        let prefer_a = !b.is_valid() || (a.is_valid() && a.key() <= b.key());
+        Ok(Self { a, b, prefer_a })
     }
 }
 
@@ -31,18 +32,38 @@ impl<
     type KeyType<'a> = A::KeyType<'a>;
 
     fn key(&self) -> Self::KeyType<'_> {
-        unimplemented!()
+        if self.prefer_a {
+            self.a.key()
+        } else {
+            self.b.key()
+        }
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        if self.prefer_a {
+            self.a.value()
+        } else {
+            self.b.value()
+        }
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        self.a.is_valid() || self.b.is_valid()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        if self.prefer_a {
+            while self.b.is_valid() && self.a.key() == self.b.key() {
+                self.b.next()?;
+            }
+            self.a.next()?;
+        } else {
+            while self.a.is_valid() && self.a.key() == self.b.key() {
+                self.a.next()?;
+            }
+            self.b.next()?;
+        }
+        self.prefer_a = !self.b.is_valid() || (self.a.is_valid() && self.a.key() <= self.b.key());
+        Ok(())
     }
 }

@@ -4,9 +4,8 @@ use std::collections::BinaryHeap;
 
 use anyhow::Result;
 
-use crate::key::KeySlice;
-
 use super::StorageIterator;
+use crate::key::KeySlice;
 
 struct HeapWrapper<I: StorageIterator>(pub usize, pub Box<I>);
 

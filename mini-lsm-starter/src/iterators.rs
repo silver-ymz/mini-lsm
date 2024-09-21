@@ -1,4 +1,5 @@
 pub mod concat_iterator;
+pub mod either_iterator;
 pub mod merge_iterator;
 pub mod two_merge_iterator;
 

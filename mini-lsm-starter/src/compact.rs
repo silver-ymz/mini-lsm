@@ -16,9 +16,11 @@ pub use simple_leveled::{
 pub use tiered::{TieredCompactionController, TieredCompactionOptions, TieredCompactionTask};
 
 use crate::iterators::concat_iterator::SstConcatIterator;
+use crate::iterators::either_iterator::EitherIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
+use crate::key::KeySlice;
 use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
 use crate::mem_table::MemTable;
 use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
@@ -114,69 +116,31 @@ pub enum CompactionOptions {
 
 impl LsmStorageInner {
     fn compact(&self, task: &CompactionTask) -> Result<Vec<Arc<SsTable>>> {
-        let state = self.state.read();
+        let state = self.state.read().clone();
         match task {
             CompactionTask::Leveled(_leveled_compaction_task) => todo!(),
             CompactionTask::Tiered(_tiered_compaction_task) => todo!(),
-            CompactionTask::Simple(_simple_leveled_compaction_task) => todo!(),
+            CompactionTask::Simple(task) => {
+                let upper_level_iter = if task.upper_level.is_none() {
+                    let iter = sstable_merge_iter(&state, &task.upper_level_sst_ids)?;
+                    EitherIterator::A(iter)
+                } else {
+                    let iter = sstable_concat_iter(&state, &task.upper_level_sst_ids)?;
+                    EitherIterator::B(iter)
+                };
+                let lower_level_iter = sstable_concat_iter(&state, &task.lower_level_sst_ids)?;
+                let iter = TwoMergeIterator::create(upper_level_iter, lower_level_iter)?;
+                self.compact_iterator(iter)
+            }
             CompactionTask::ForceFullCompaction {
                 l0_sstables,
                 l1_sstables,
             } => {
-                let mut l0_sstable_iters = Vec::new();
-                for id in l0_sstables {
-                    let sst = state
-                        .sstables
-                        .get(id)
-                        .ok_or(anyhow::anyhow!("sstable not found"))?;
-                    l0_sstable_iters.push(Box::new(SsTableIterator::create_and_seek_to_first(
-                        sst.clone(),
-                    )?));
-                }
-                let mut l1_sstables_actual = Vec::new();
-                for id in l1_sstables {
-                    let sst = state
-                        .sstables
-                        .get(id)
-                        .ok_or(anyhow::anyhow!("sstable not found"))?;
-                    l1_sstables_actual.push(sst.clone());
-                }
-                let mut total_iter = TwoMergeIterator::create(
-                    MergeIterator::create(l0_sstable_iters),
-                    SstConcatIterator::create_and_seek_to_first(l1_sstables_actual)?,
+                let iter = TwoMergeIterator::create(
+                    sstable_merge_iter(&state, l0_sstables)?,
+                    sstable_concat_iter(&state, l1_sstables)?,
                 )?;
-
-                let flush_memtable = |memtable: MemTable| -> Result<SsTable> {
-                    let mut sst_builder = SsTableBuilder::new(self.options.block_size);
-                    memtable.flush(&mut sst_builder)?;
-                    sst_builder.build(
-                        memtable.id(),
-                        Some(self.block_cache.clone()),
-                        self.path_of_sst(memtable.id()),
-                    )
-                };
-
-                let mut new_ssts = Vec::new();
-                let mut memtable = MemTable::create(self.next_sst_id());
-                while total_iter.is_valid() {
-                    if total_iter.value().is_empty() {
-                        total_iter.next()?;
-                        continue;
-                    }
-                    memtable.put(total_iter.key().raw_ref(), total_iter.value())?;
-                    total_iter.next()?;
-                    if memtable.approximate_size() >= self.options.target_sst_size {
-                        let sstable = flush_memtable(memtable)?;
-                        new_ssts.push(Arc::new(sstable));
-                        memtable = MemTable::create(self.next_sst_id());
-                    }
-                }
-                if memtable.approximate_size() > 0 {
-                    let sstable = flush_memtable(memtable)?;
-                    new_ssts.push(Arc::new(sstable));
-                }
-
-                Ok(new_ssts)
+                self.compact_iterator(iter)
             }
         }
     }
@@ -226,7 +190,39 @@ impl LsmStorageInner {
     }
 
     fn trigger_compaction(&self) -> Result<()> {
-        unimplemented!()
+        let snapshot = self.state.read().as_ref().clone();
+        let Some(task) = self
+            .compaction_controller
+            .generate_compaction_task(&snapshot)
+        else {
+            return Ok(());
+        };
+
+        let new_sstables = self.compact(&task)?;
+
+        let del;
+        {
+            let _state_lock = self.state_lock.lock();
+            let mut guard = self.state.write();
+            let mut snapshot = guard.as_ref().clone();
+            let output = new_sstables.iter().map(|s| s.sst_id()).collect::<Vec<_>>();
+            (snapshot, del) = self
+                .compaction_controller
+                .apply_compaction_result(&snapshot, &task, &output, false);
+            for id in &del {
+                snapshot.sstables.remove(id);
+            }
+            for sst in new_sstables {
+                snapshot.sstables.insert(sst.sst_id(), sst);
+            }
+            *guard = Arc::new(snapshot);
+        }
+
+        for id in del {
+            std::fs::remove_file(self.path_of_sst(id))?;
+        }
+
+        Ok(())
     }
 
     pub(crate) fn spawn_compaction_thread(
@@ -280,4 +276,71 @@ impl LsmStorageInner {
         });
         Ok(Some(handle))
     }
+
+    fn flush_memtable(&self, memtable: MemTable) -> Result<Arc<SsTable>> {
+        let mut sst_builder = SsTableBuilder::new(self.options.block_size);
+        memtable.flush(&mut sst_builder)?;
+        let sstable = sst_builder.build(
+            memtable.id(),
+            Some(self.block_cache.clone()),
+            self.path_of_sst(memtable.id()),
+        )?;
+        Ok(Arc::new(sstable))
+    }
+
+    fn compact_iterator<I: for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>>(
+        &self,
+        mut iter: I,
+    ) -> Result<Vec<Arc<SsTable>>> {
+        let mut new_ssts = Vec::new();
+        let mut memtable = MemTable::create(self.next_sst_id());
+        while iter.is_valid() {
+            if iter.value().is_empty() {
+                iter.next()?;
+                continue;
+            }
+            memtable.put(iter.key().raw_ref(), iter.value())?;
+            iter.next()?;
+            if memtable.approximate_size() >= self.options.target_sst_size {
+                let sstable = self.flush_memtable(memtable)?;
+                new_ssts.push(sstable);
+                memtable = MemTable::create(self.next_sst_id());
+            }
+        }
+        if memtable.approximate_size() > 0 {
+            let sstable = self.flush_memtable(memtable)?;
+            new_ssts.push(sstable);
+        }
+
+        Ok(new_ssts)
+    }
+}
+
+fn sstable_merge_iter(
+    state: &LsmStorageState,
+    sstables: &[usize],
+) -> Result<MergeIterator<SsTableIterator>> {
+    let mut sstable_iters = Vec::new();
+    for id in sstables {
+        let sst = state
+            .sstables
+            .get(id)
+            .ok_or(anyhow::anyhow!("sstable not found"))?;
+        sstable_iters.push(Box::new(SsTableIterator::create_and_seek_to_first(
+            sst.clone(),
+        )?));
+    }
+    Ok(MergeIterator::create(sstable_iters))
+}
+
+fn sstable_concat_iter(state: &LsmStorageState, sstables: &[usize]) -> Result<SstConcatIterator> {
+    let mut sstables_actual = Vec::new();
+    for id in sstables {
+        let sst = state
+            .sstables
+            .get(id)
+            .ok_or(anyhow::anyhow!("sstable not found"))?;
+        sstables_actual.push(sst.clone());
+    }
+    SstConcatIterator::create_and_seek_to_first(sstables_actual)
 }

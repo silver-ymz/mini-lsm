@@ -1,3 +1,17 @@
+// Copyright (c) 2022-2025 Alex Chi Z
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #![allow(dead_code)]
 
 use std::{
@@ -370,6 +384,7 @@ pub fn check_compaction_ratio(storage: Arc<MiniLsm>) {
             max_size_amplification_percent,
             size_ratio,
             min_merge_width,
+            ..
         }) => {
             let size_ratio_trigger = (100.0 + size_ratio as f64) / 100.0;
             assert_eq!(l0_sst_num, 0);

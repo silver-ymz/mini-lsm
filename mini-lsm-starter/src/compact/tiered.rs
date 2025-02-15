@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::{cmp::Reverse, collections::HashSet};
+
 use serde::{Deserialize, Serialize};
 
 use crate::lsm_storage::LsmStorageState;
@@ -42,17 +44,84 @@ impl TieredCompactionController {
 
     pub fn generate_compaction_task(
         &self,
-        _snapshot: &LsmStorageState,
+        snapshot: &LsmStorageState,
     ) -> Option<TieredCompactionTask> {
-        unimplemented!()
+        // Precondition
+        if snapshot.levels.len() < self.options.num_tiers {
+            return None;
+        }
+
+        // Triggered by Space Amplification Ratio
+        let last_level_size = snapshot.levels.last().unwrap().1.len();
+        let engine_size = snapshot
+            .levels
+            .iter()
+            .map(|(_, ssts)| ssts.len())
+            .sum::<usize>()
+            - last_level_size;
+
+        if engine_size * 100 / last_level_size >= self.options.max_size_amplification_percent {
+            return Some(TieredCompactionTask {
+                tiers: snapshot.levels.clone(),
+                bottom_tier_included: true,
+            });
+        }
+
+        // Triggered by Size Ratio
+        let start = self.options.min_merge_width;
+        let mut previous_levels_size = snapshot
+            .levels
+            .iter()
+            .take(start)
+            .map(|(_, ssts)| ssts.len())
+            .sum::<usize>();
+        for i in start..snapshot.levels.len() {
+            let current_level_size = snapshot.levels[i].1.len();
+            if current_level_size * 100 / previous_levels_size >= 100 + self.options.size_ratio {
+                return Some(TieredCompactionTask {
+                    tiers: snapshot.levels.iter().take(i).cloned().collect(),
+                    bottom_tier_included: i == snapshot.levels.len() - 1,
+                });
+            }
+            previous_levels_size += current_level_size;
+        }
+
+        let max_width = self.options.max_merge_width.unwrap_or(usize::MAX);
+        Some(TieredCompactionTask {
+            tiers: snapshot.levels.iter().take(max_width).cloned().collect(),
+            bottom_tier_included: max_width >= snapshot.levels.len(),
+        })
     }
 
     pub fn apply_compaction_result(
         &self,
-        _snapshot: &LsmStorageState,
-        _task: &TieredCompactionTask,
-        _output: &[usize],
+        snapshot: &LsmStorageState,
+        task: &TieredCompactionTask,
+        output: &[usize],
     ) -> (LsmStorageState, Vec<usize>) {
-        unimplemented!()
+        let mut new_snapshot = snapshot.clone();
+        let mut to_remove = Vec::new();
+
+        // Remove the compacted levels
+        let merged_levels = task.tiers.iter().map(|(id, _)| *id).collect::<HashSet<_>>();
+        new_snapshot.levels.retain(|(level, files)| {
+            if merged_levels.contains(level) {
+                to_remove.extend(files);
+                false
+            } else {
+                true
+            }
+        });
+
+        // Insert the new levels
+        let pos = new_snapshot
+            .levels
+            .binary_search_by_key(&Reverse(task.tiers[0].0), |(level, _)| Reverse(*level))
+            .unwrap_err();
+        new_snapshot
+            .levels
+            .insert(pos, (output[0], output.to_vec()));
+
+        (new_snapshot, to_remove)
     }
 }

@@ -95,7 +95,7 @@ impl Bloom {
 
         for h in keys {
             let mut h = *h;
-            let delta = (h >> 17) | (h << 15);
+            let delta = h.rotate_left(15);
             for _ in 0..k {
                 let idx = h as usize % nbits;
                 filter.set_bit(idx, true);

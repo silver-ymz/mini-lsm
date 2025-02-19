@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 pub(crate) mod bloom;
 mod builder;
 mod iterator;
@@ -106,15 +103,13 @@ impl FileObject {
     /// Create a new file object (day 2) and write the file to the disk (day 4).
     pub fn create(path: &Path, data: Vec<u8>) -> Result<Self> {
         std::fs::write(path, &data)?;
-        File::open(path)?.sync_all()?;
-        Ok(FileObject(
-            Some(File::options().read(true).write(false).open(path)?),
-            data.len() as u64,
-        ))
+        let file = File::open(path)?;
+        file.sync_all()?;
+        Ok(FileObject(Some(file), data.len() as u64))
     }
 
     pub fn open(path: &Path) -> Result<Self> {
-        let file = File::options().read(true).write(false).open(path)?;
+        let file = File::open(path)?;
         let size = file.metadata()?.len();
         Ok(FileObject(Some(file), size))
     }

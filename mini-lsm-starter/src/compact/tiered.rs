@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::lsm_storage::LsmStorageState;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TieredCompactionTask {
     pub tiers: Vec<(usize, Vec<usize>)>,
     pub bottom_tier_included: bool,
@@ -99,12 +99,12 @@ impl TieredCompactionController {
         task: &TieredCompactionTask,
         output: &[usize],
     ) -> (LsmStorageState, Vec<usize>) {
-        let mut new_snapshot = snapshot.clone();
+        let mut snapshot = snapshot.clone();
         let mut to_remove = Vec::new();
 
         // Remove the compacted levels
         let merged_levels = task.tiers.iter().map(|(id, _)| *id).collect::<HashSet<_>>();
-        new_snapshot.levels.retain(|(level, files)| {
+        snapshot.levels.retain(|(level, files)| {
             if merged_levels.contains(level) {
                 to_remove.extend(files);
                 false
@@ -114,14 +114,12 @@ impl TieredCompactionController {
         });
 
         // Insert the new levels
-        let pos = new_snapshot
+        let pos = snapshot
             .levels
             .binary_search_by_key(&Reverse(task.tiers[0].0), |(level, _)| Reverse(*level))
             .unwrap_err();
-        new_snapshot
-            .levels
-            .insert(pos, (output[0], output.to_vec()));
+        snapshot.levels.insert(pos, (output[0], output.to_vec()));
 
-        (new_snapshot, to_remove)
+        (snapshot, to_remove)
     }
 }

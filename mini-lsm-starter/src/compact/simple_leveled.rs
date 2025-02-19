@@ -23,7 +23,7 @@ pub struct SimpleLeveledCompactionOptions {
     pub max_levels: usize,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimpleLeveledCompactionTask {
     // if upper_level is `None`, then it is L0 compaction
     pub upper_level: Option<usize>,
@@ -94,20 +94,20 @@ impl SimpleLeveledCompactionController {
         task: &SimpleLeveledCompactionTask,
         output: &[usize],
     ) -> (LsmStorageState, Vec<usize>) {
-        let mut new_snapshot = snapshot.clone();
+        let mut snapshot = snapshot.clone();
         match task.upper_level {
             None => {
-                new_snapshot
+                snapshot
                     .l0_sstables
-                    .truncate(new_snapshot.l0_sstables.len() - task.upper_level_sst_ids.len());
+                    .truncate(snapshot.l0_sstables.len() - task.upper_level_sst_ids.len());
             }
             Some(level) => {
-                new_snapshot.levels[level - 1].1.clear();
+                snapshot.levels[level - 1].1.clear();
             }
         }
-        new_snapshot.levels[task.lower_level - 1].1 = output.to_vec();
+        snapshot.levels[task.lower_level - 1].1 = output.to_vec();
         let mut del = task.upper_level_sst_ids.clone();
         del.extend(&task.lower_level_sst_ids);
-        (new_snapshot, del)
+        (snapshot, del)
     }
 }

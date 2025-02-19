@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::lsm_storage::LsmStorageState;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LeveledCompactionTask {
     // if upper_level is `None`, then it is L0 compaction
     pub upper_level: Option<usize>,
@@ -157,52 +157,61 @@ impl LeveledCompactionController {
         snapshot: &LsmStorageState,
         task: &LeveledCompactionTask,
         output: &[usize],
-        _in_recovery: bool,
+        in_recovery: bool,
     ) -> (LsmStorageState, Vec<usize>) {
-        let mut new_snapshot = snapshot.clone();
+        let mut snapshot = snapshot.clone();
 
         // Remove SSTs from upper level
         if let Some(upper_level) = task.upper_level {
-            new_snapshot.levels[upper_level - 1]
+            snapshot.levels[upper_level - 1]
                 .1
                 .retain(|sst_id| !task.upper_level_sst_ids.contains(sst_id));
         } else {
-            new_snapshot
+            snapshot
                 .l0_sstables
                 .retain(|sst_id| !task.upper_level_sst_ids.contains(sst_id));
         }
 
         // Replace SSTs from lower level
-        let first_key = task
-            .upper_level_sst_ids
-            .iter()
-            .map(|sst_id| new_snapshot.sstables[sst_id].first_key())
-            .min()
-            .unwrap();
-        let last_key = task
-            .upper_level_sst_ids
-            .iter()
-            .map(|sst_id| new_snapshot.sstables[sst_id].last_key())
-            .max()
-            .unwrap();
-        let first_idx = new_snapshot.levels[task.lower_level - 1]
-            .1
-            .partition_point(|sst_id| new_snapshot.sstables[sst_id].last_key() < first_key);
-        let last_idx = new_snapshot.levels[task.lower_level - 1]
-            .1
-            .partition_point(|sst_id| new_snapshot.sstables[sst_id].first_key() <= last_key);
-        let mut new_sst_ids = Vec::with_capacity(
-            new_snapshot.levels[task.lower_level - 1].1.len() - (last_idx - first_idx)
-                + output.len(),
-        );
-        new_sst_ids.extend_from_slice(&new_snapshot.levels[task.lower_level - 1].1[..first_idx]);
-        new_sst_ids.extend_from_slice(output);
-        new_sst_ids.extend_from_slice(&new_snapshot.levels[task.lower_level - 1].1[last_idx..]);
-        new_snapshot.levels[task.lower_level - 1].1 = new_sst_ids;
+        if !in_recovery {
+            let first_key = task
+                .upper_level_sst_ids
+                .iter()
+                .map(|sst_id| snapshot.sstables[sst_id].first_key())
+                .min()
+                .unwrap();
+            let last_key = task
+                .upper_level_sst_ids
+                .iter()
+                .map(|sst_id| snapshot.sstables[sst_id].last_key())
+                .max()
+                .unwrap();
+            let first_idx = snapshot.levels[task.lower_level - 1]
+                .1
+                .partition_point(|sst_id| snapshot.sstables[sst_id].last_key() < first_key);
+            let last_idx = snapshot.levels[task.lower_level - 1]
+                .1
+                .partition_point(|sst_id| snapshot.sstables[sst_id].first_key() <= last_key);
+            let mut new_sst_ids = Vec::with_capacity(
+                snapshot.levels[task.lower_level - 1].1.len() - (last_idx - first_idx)
+                    + output.len(),
+            );
+            new_sst_ids.extend_from_slice(&snapshot.levels[task.lower_level - 1].1[..first_idx]);
+            new_sst_ids.extend_from_slice(output);
+            new_sst_ids.extend_from_slice(&snapshot.levels[task.lower_level - 1].1[last_idx..]);
+            snapshot.levels[task.lower_level - 1].1 = new_sst_ids;
+        } else {
+            snapshot.levels[task.lower_level - 1]
+                .1
+                .retain(|sst_id| !task.lower_level_sst_ids.contains(sst_id));
+            snapshot.levels[task.lower_level - 1]
+                .1
+                .extend_from_slice(output);
+        }
 
         let mut del = task.upper_level_sst_ids.clone();
         del.extend(&task.lower_level_sst_ids);
 
-        (new_snapshot, del)
+        (snapshot, del)
     }
 }

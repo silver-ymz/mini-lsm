@@ -45,27 +45,164 @@ impl LeveledCompactionController {
 
     fn find_overlapping_ssts(
         &self,
-        _snapshot: &LsmStorageState,
-        _sst_ids: &[usize],
-        _in_level: usize,
+        snapshot: &LsmStorageState,
+        sst_ids: &[usize],
+        in_level: usize,
     ) -> Vec<usize> {
-        unimplemented!()
+        let first_key = sst_ids
+            .iter()
+            .map(|sst_id| snapshot.sstables[sst_id].first_key())
+            .min()
+            .unwrap();
+        let last_key = sst_ids
+            .iter()
+            .map(|sst_id| snapshot.sstables[sst_id].last_key())
+            .max()
+            .unwrap();
+
+        let start_idx = snapshot.levels[in_level - 1]
+            .1
+            .partition_point(|sst_id| snapshot.sstables[sst_id].last_key() < first_key);
+        let end_idx = snapshot.levels[in_level - 1]
+            .1
+            .partition_point(|sst_id| snapshot.sstables[sst_id].first_key() <= last_key);
+
+        snapshot.levels[in_level - 1].1[start_idx..end_idx].to_vec()
     }
 
     pub fn generate_compaction_task(
         &self,
-        _snapshot: &LsmStorageState,
+        snapshot: &LsmStorageState,
     ) -> Option<LeveledCompactionTask> {
-        unimplemented!()
+        let mut target_level_size = vec![0; self.options.max_levels];
+        let actual_level_size = snapshot
+            .levels
+            .iter()
+            .map(|level| {
+                level
+                    .1
+                    .iter()
+                    .map(|sst_id| snapshot.sstables[sst_id].file.size())
+                    .sum::<u64>()
+            })
+            .collect::<Vec<_>>();
+
+        // Compute Target Sizes
+        let base_level_size = self.options.base_level_size_mb as u64 * 1024 * 1024;
+        if actual_level_size[self.options.max_levels - 1] > base_level_size {
+            target_level_size[self.options.max_levels - 1] =
+                actual_level_size[self.options.max_levels - 1];
+            for i in (0..self.options.max_levels - 1).rev() {
+                target_level_size[i] =
+                    target_level_size[i + 1] / self.options.level_size_multiplier as u64;
+                if target_level_size[i] < base_level_size {
+                    break;
+                }
+            }
+        } else {
+            target_level_size[self.options.max_levels - 1] = base_level_size;
+        }
+
+        // Decide Base Level
+        // dbg!(&target_level_size, &actual_level_size);
+        if snapshot.l0_sstables.len() >= self.options.level0_file_num_compaction_trigger {
+            let base_level = target_level_size.partition_point(|&size| size == 0) + 1;
+            let base_level_sst_ids =
+                self.find_overlapping_ssts(snapshot, &snapshot.l0_sstables, base_level);
+            return Some(LeveledCompactionTask {
+                upper_level: None,
+                upper_level_sst_ids: snapshot.l0_sstables.clone(),
+                lower_level: base_level,
+                lower_level_sst_ids: base_level_sst_ids,
+                is_lower_level_bottom_level: base_level == self.options.max_levels,
+            });
+        }
+
+        // Decide Level Priorities
+        let mut upper_level = None;
+        let mut max_priority = 0.0;
+        for level in 1..self.options.max_levels {
+            if actual_level_size[level - 1] == 0 {
+                continue;
+            }
+            let priority =
+                actual_level_size[level - 1] as f32 / target_level_size[level - 1] as f32;
+            if priority <= 1.0 {
+                continue;
+            }
+            if priority > max_priority {
+                max_priority = priority;
+                upper_level = Some(level);
+            }
+        }
+        let upper_level = upper_level?;
+
+        // Select SST to Compact
+        let upper_level_sst_id = *snapshot.levels[upper_level - 1].1.iter().min().unwrap();
+        let lower_level = upper_level + 1;
+        let lower_level_sst_ids =
+            self.find_overlapping_ssts(snapshot, &[upper_level_sst_id], lower_level);
+
+        Some(LeveledCompactionTask {
+            upper_level: Some(upper_level),
+            upper_level_sst_ids: vec![upper_level_sst_id],
+            lower_level,
+            lower_level_sst_ids,
+            is_lower_level_bottom_level: lower_level == self.options.max_levels,
+        })
     }
 
     pub fn apply_compaction_result(
         &self,
-        _snapshot: &LsmStorageState,
-        _task: &LeveledCompactionTask,
-        _output: &[usize],
+        snapshot: &LsmStorageState,
+        task: &LeveledCompactionTask,
+        output: &[usize],
         _in_recovery: bool,
     ) -> (LsmStorageState, Vec<usize>) {
-        unimplemented!()
+        let mut new_snapshot = snapshot.clone();
+
+        // Remove SSTs from upper level
+        if let Some(upper_level) = task.upper_level {
+            new_snapshot.levels[upper_level - 1]
+                .1
+                .retain(|sst_id| !task.upper_level_sst_ids.contains(sst_id));
+        } else {
+            new_snapshot
+                .l0_sstables
+                .retain(|sst_id| !task.upper_level_sst_ids.contains(sst_id));
+        }
+
+        // Replace SSTs from lower level
+        let first_key = task
+            .upper_level_sst_ids
+            .iter()
+            .map(|sst_id| new_snapshot.sstables[sst_id].first_key())
+            .min()
+            .unwrap();
+        let last_key = task
+            .upper_level_sst_ids
+            .iter()
+            .map(|sst_id| new_snapshot.sstables[sst_id].last_key())
+            .max()
+            .unwrap();
+        let first_idx = new_snapshot.levels[task.lower_level - 1]
+            .1
+            .partition_point(|sst_id| new_snapshot.sstables[sst_id].last_key() < first_key);
+        let last_idx = new_snapshot.levels[task.lower_level - 1]
+            .1
+            .partition_point(|sst_id| new_snapshot.sstables[sst_id].first_key() <= last_key);
+        let mut new_sst_ids = Vec::with_capacity(
+            new_snapshot.levels[task.lower_level - 1].1.len() - (last_idx - first_idx)
+                + output.len(),
+        );
+        new_sst_ids.extend_from_slice(&new_snapshot.levels[task.lower_level - 1].1[..first_idx]);
+        new_sst_ids.extend_from_slice(output);
+        new_sst_ids.extend_from_slice(&new_snapshot.levels[task.lower_level - 1].1[last_idx..]);
+        new_snapshot.levels[task.lower_level - 1].1 = new_sst_ids;
+
+        let mut del = task.upper_level_sst_ids.clone();
+        del.extend(&task.lower_level_sst_ids);
+
+        (new_snapshot, del)
     }
 }

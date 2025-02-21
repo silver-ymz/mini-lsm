@@ -1,4 +1,3 @@
-// REMOVE THIS LINE after fully implementing this functionality
 // Copyright (c) 2022-2025 Alex Chi Z
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,11 +11,9 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -30,16 +27,50 @@ pub struct Wal {
 }
 
 impl Wal {
-    pub fn create(_path: impl AsRef<Path>) -> Result<Self> {
-        unimplemented!()
+    pub fn create(path: impl AsRef<Path>) -> Result<Self> {
+        let file = File::create(path)?;
+        let file = Arc::new(Mutex::new(BufWriter::new(file)));
+        Ok(Self { file })
     }
 
-    pub fn recover(_path: impl AsRef<Path>, _skiplist: &SkipMap<Bytes, Bytes>) -> Result<Self> {
-        unimplemented!()
+    pub fn recover(path: impl AsRef<Path>, skiplist: &SkipMap<Bytes, Bytes>) -> Result<Self> {
+        let file = File::open(&path)?;
+        let mut reader = BufReader::new(file);
+        let mut length_buf = [0u8; std::mem::size_of::<usize>()];
+        loop {
+            match reader.read_exact(&mut length_buf) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e.into()),
+            }
+            let length = usize::from_le_bytes(length_buf);
+            assert!(length > 0);
+            let mut key = vec![0u8; length];
+            reader.read_exact(&mut key)?;
+            let key = Bytes::from(key);
+
+            reader.read_exact(&mut length_buf)?;
+            let length = usize::from_le_bytes(length_buf);
+            let mut value = vec![0u8; length];
+            reader.read_exact(&mut value)?;
+            let value = Bytes::from(value);
+
+            skiplist.insert(key, value);
+        }
+
+        let file = File::options().append(true).open(path)?;
+        let file = Arc::new(Mutex::new(BufWriter::new(file)));
+
+        Ok(Self { file })
     }
 
-    pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        unimplemented!()
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        let mut file = self.file.lock();
+        file.write_all(&key.len().to_le_bytes())?;
+        file.write_all(key)?;
+        file.write_all(&value.len().to_le_bytes())?;
+        file.write_all(value)?;
+        Ok(())
     }
 
     /// Implement this in week 3, day 5.
@@ -48,6 +79,9 @@ impl Wal {
     }
 
     pub fn sync(&self) -> Result<()> {
-        unimplemented!()
+        let mut file = self.file.lock();
+        file.flush()?;
+        file.get_ref().sync_all()?;
+        Ok(())
     }
 }

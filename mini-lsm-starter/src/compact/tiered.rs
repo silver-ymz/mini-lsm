@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{cmp::Reverse, collections::HashSet};
+use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
@@ -104,6 +104,11 @@ impl TieredCompactionController {
 
         // Remove the compacted levels
         let merged_levels = task.tiers.iter().map(|(id, _)| *id).collect::<HashSet<_>>();
+        let pos = snapshot
+            .levels
+            .iter()
+            .position(|(level, _)| merged_levels.contains(level))
+            .unwrap();
         snapshot.levels.retain(|(level, files)| {
             if merged_levels.contains(level) {
                 to_remove.extend(files);
@@ -114,10 +119,6 @@ impl TieredCompactionController {
         });
 
         // Insert the new levels
-        let pos = snapshot
-            .levels
-            .binary_search_by_key(&Reverse(task.tiers[0].0), |(level, _)| Reverse(*level))
-            .unwrap_err();
         snapshot.levels.insert(pos, (output[0], output.to_vec()));
 
         (snapshot, to_remove)

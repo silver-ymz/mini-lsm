@@ -114,6 +114,9 @@ impl MemTable {
             key.len() + value.len(),
             std::sync::atomic::Ordering::Relaxed,
         );
+        if let Some(wal) = self.wal.as_ref() {
+            wal.put(key, value)?;
+        }
         Ok(())
     }
 

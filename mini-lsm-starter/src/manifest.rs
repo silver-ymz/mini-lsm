@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
-use std::{fs::File, io::Seek};
 
 use anyhow::Result;
 use parking_lot::{Mutex, MutexGuard};
@@ -40,11 +40,12 @@ impl Manifest {
     }
 
     pub fn recover(path: impl AsRef<Path>) -> Result<(Self, Vec<ManifestRecord>)> {
-        let mut file = File::open(path)?;
+        let file = File::open(&path)?;
         let records = serde_json::Deserializer::from_reader(&file)
             .into_iter()
             .collect::<Result<Vec<ManifestRecord>, _>>()?;
-        file.seek(std::io::SeekFrom::Start(0))?;
+
+        let file = File::options().append(true).open(path)?;
         let file = Arc::new(Mutex::new(file));
         Ok((Self { file }, records))
     }

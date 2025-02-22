@@ -96,12 +96,16 @@ impl SsTableBuilder {
         let mut data = self.data;
         let block_meta_offset = data.len();
         BlockMeta::encode_block_meta(&self.meta, &mut data);
+        let meta_checksum = crc32fast::hash(&data[block_meta_offset..]);
+        data.extend_from_slice(&meta_checksum.to_le_bytes());
         data.extend_from_slice(&block_meta_offset.to_le_bytes());
 
         let bloom_offset = data.len();
         let bloom_bits = Bloom::bloom_bits_per_key(self.key_hashes.len(), 0.01);
         let bloom = Bloom::build_from_key_hashes(&self.key_hashes, bloom_bits);
         bloom.encode(&mut data);
+        let bloom_checksum = crc32fast::hash(&data[bloom_offset..]);
+        data.extend_from_slice(&bloom_checksum.to_le_bytes());
         data.extend_from_slice(&bloom_offset.to_le_bytes());
 
         let file = FileObject::create(path.as_ref(), data)?;
@@ -136,7 +140,12 @@ impl SsTableBuilder {
             last_key: Key::from_bytes(Bytes::copy_from_slice(&self.last_key)),
         };
         self.meta.push(meta);
-        self.data.extend_from_slice(block.encode().as_ref());
+
+        let encoded_block = block.encode();
+        self.data.extend_from_slice(&encoded_block);
+        let checksum = crc32fast::hash(&encoded_block);
+        self.data.extend_from_slice(&checksum.to_le_bytes());
+
         self.first_key.clear();
         self.last_key.clear();
     }

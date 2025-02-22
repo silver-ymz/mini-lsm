@@ -142,16 +142,26 @@ impl SsTable {
     pub fn open(id: usize, block_cache: Option<Arc<BlockCache>>, file: FileObject) -> Result<Self> {
         let bloom_offset =
             usize::from_le_bytes(file.read(file.size() - 8, 8)?.as_slice().try_into()?) as u64;
-        let bloom = Bloom::decode(
-            file.read(bloom_offset, file.size() - bloom_offset - 8)?
-                .as_slice(),
-        )?;
+        let bloom_data = file.read(bloom_offset, file.size() - bloom_offset - 8)?;
+        let (bloom_data, checksum_data) = bloom_data.split_last_chunk::<4>().unwrap();
+        let checksum_stored = u32::from_le_bytes(*checksum_data);
+        let checksum_actual = crc32fast::hash(bloom_data);
+        if checksum_stored != checksum_actual {
+            return Err(anyhow::anyhow!("checksum mismatch when reading bloom"));
+        }
+        let bloom = Bloom::decode(bloom_data)?;
+
         let block_meta_offset =
             usize::from_le_bytes(file.read(bloom_offset - 8, 8)?.as_slice().try_into()?) as u64;
-        let block_meta = BlockMeta::decode_block_meta(
-            file.read(block_meta_offset, bloom_offset - block_meta_offset - 8)?
-                .as_slice(),
-        );
+        let block_meta_data = file.read(block_meta_offset, bloom_offset - block_meta_offset - 8)?;
+        let (block_meta_data, checksum_data) = block_meta_data.split_last_chunk::<4>().unwrap();
+        let checksum_stored = u32::from_le_bytes(*checksum_data);
+        let checksum_actual = crc32fast::hash(block_meta_data);
+        if checksum_stored != checksum_actual {
+            return Err(anyhow::anyhow!("checksum mismatch when reading block meta"));
+        }
+        let block_meta = BlockMeta::decode_block_meta(block_meta_data);
+
         let first_key = block_meta
             .first()
             .map_or(Key::from_bytes(Bytes::new()), |m| m.first_key.clone());
@@ -199,7 +209,13 @@ impl SsTable {
             .get(block_idx + 1)
             .map_or(self.block_meta_offset, |m| m.offset) as u64;
         let data = self.file.read(begin_offset, end_offset - begin_offset)?;
-        let block = Block::decode(&data);
+        let (data, checksum_data) = data.split_last_chunk::<4>().unwrap();
+        let checksum_stored = u32::from_le_bytes(*checksum_data);
+        let checksum_actual = crc32fast::hash(data);
+        if checksum_stored != checksum_actual {
+            return Err(anyhow::anyhow!("checksum mismatch when reading block"));
+        }
+        let block = Block::decode(data);
         Ok(Arc::new(block))
     }
 

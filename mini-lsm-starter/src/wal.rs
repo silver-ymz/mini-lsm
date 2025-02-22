@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -22,54 +22,91 @@ use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
 use parking_lot::Mutex;
 
+struct WalInner {
+    file: File,
+    buf: Vec<u8>,
+    hasher: crc32fast::Hasher,
+}
+
 pub struct Wal {
-    file: Arc<Mutex<BufWriter<File>>>,
+    inner: Arc<Mutex<WalInner>>,
 }
 
 impl Wal {
     pub fn create(path: impl AsRef<Path>) -> Result<Self> {
-        let file = File::create(path)?;
-        let file = Arc::new(Mutex::new(BufWriter::new(file)));
-        Ok(Self { file })
+        let mut file = File::create(path)?;
+
+        file.write_all(&crc32fast::hash(b"").to_le_bytes())?;
+        Ok(Self {
+            inner: Arc::new(Mutex::new(WalInner {
+                file,
+                buf: Vec::new(),
+                hasher: crc32fast::Hasher::new(),
+            })),
+        })
     }
 
     pub fn recover(path: impl AsRef<Path>, skiplist: &SkipMap<Bytes, Bytes>) -> Result<Self> {
-        let file = File::open(&path)?;
-        let mut reader = BufReader::new(file);
-        let mut length_buf = [0u8; std::mem::size_of::<usize>()];
-        loop {
-            match reader.read_exact(&mut length_buf) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e.into()),
-            }
-            let length = usize::from_le_bytes(length_buf);
-            assert!(length > 0);
-            let mut key = vec![0u8; length];
-            reader.read_exact(&mut key)?;
-            let key = Bytes::from(key);
+        let mut file = File::open(&path)?;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf)?;
 
-            reader.read_exact(&mut length_buf)?;
-            let length = usize::from_le_bytes(length_buf);
-            let mut value = vec![0u8; length];
-            reader.read_exact(&mut value)?;
-            let value = Bytes::from(value);
-
-            skiplist.insert(key, value);
+        let (data, checksum_data) = buf.split_last_chunk::<4>().unwrap();
+        let checksum_stored = u32::from_le_bytes(*checksum_data);
+        let checksum_actual = crc32fast::hash(data);
+        if checksum_stored != checksum_actual {
+            return Err(anyhow::anyhow!("Checksum mismatch in WAL"));
         }
 
-        let file = File::options().append(true).open(path)?;
-        let file = Arc::new(Mutex::new(BufWriter::new(file)));
+        let mut read_slice = data;
+        while !read_slice.is_empty() {
+            let (key_length_data, remain_data) = read_slice.split_first_chunk::<8>().unwrap();
+            let key_length = usize::from_le_bytes(*key_length_data);
+            assert!(key_length > 0);
+            let (key_data, remain_data) = remain_data.split_at(key_length);
+            let key = Bytes::copy_from_slice(key_data);
 
-        Ok(Self { file })
+            let (value_length_data, remain_data) = remain_data.split_first_chunk::<8>().unwrap();
+            let value_length = usize::from_le_bytes(*value_length_data);
+            let (value_data, remain_data) = remain_data.split_at(value_length);
+            let value = Bytes::copy_from_slice(value_data);
+
+            skiplist.insert(key, value);
+            read_slice = remain_data;
+        }
+
+        let mut file = File::options().write(true).open(path)?;
+        file.seek(std::io::SeekFrom::End(0))?;
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(data);
+
+        Ok(Self {
+            inner: Arc::new(Mutex::new(WalInner {
+                file,
+                buf: Vec::new(),
+                hasher: crc32fast::Hasher::new(),
+            })),
+        })
     }
 
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        let mut file = self.file.lock();
-        file.write_all(&key.len().to_le_bytes())?;
-        file.write_all(key)?;
-        file.write_all(&value.len().to_le_bytes())?;
-        file.write_all(value)?;
+        let mut inner = self.inner.lock();
+        let inner = &mut *inner;
+
+        inner.buf.write_all(&key.len().to_le_bytes())?;
+        inner.buf.write_all(key)?;
+        inner.buf.write_all(&value.len().to_le_bytes())?;
+        inner.buf.write_all(value)?;
+
+        inner.hasher.update(&inner.buf);
+        let checksum = inner.hasher.clone().finalize();
+        inner.buf.write_all(&checksum.to_le_bytes())?;
+
+        inner.file.seek_relative(-4)?;
+        inner.file.write_all(&inner.buf)?;
+
+        inner.buf.clear();
+
         Ok(())
     }
 
@@ -79,9 +116,9 @@ impl Wal {
     }
 
     pub fn sync(&self) -> Result<()> {
-        let mut file = self.file.lock();
-        file.flush()?;
-        file.get_ref().sync_all()?;
+        let mut inner = self.inner.lock();
+        inner.file.flush()?;
+        inner.file.sync_all()?;
         Ok(())
     }
 }

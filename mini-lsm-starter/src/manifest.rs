@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fs::File;
+use std::io::{BufReader, Read};
 use std::path::Path;
 use std::sync::Arc;
+use std::{fs::File, io::Write};
 
 use anyhow::Result;
 use parking_lot::{Mutex, MutexGuard};
@@ -40,10 +41,34 @@ impl Manifest {
     }
 
     pub fn recover(path: impl AsRef<Path>) -> Result<(Self, Vec<ManifestRecord>)> {
-        let file = File::open(&path)?;
-        let records = serde_json::Deserializer::from_reader(&file)
-            .into_iter()
-            .collect::<Result<Vec<ManifestRecord>, _>>()?;
+        let mut file = BufReader::new(File::open(&path)?);
+        let mut buf = [0; 8];
+        let mut data_buf = Vec::new();
+        let mut records = Vec::new();
+
+        loop {
+            match file.read_exact(&mut buf) {
+                Ok(()) => (),
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e.into()),
+            }
+            let len = usize::from_le_bytes(buf);
+            assert!(len > 0);
+            data_buf.resize(len, 0);
+            file.read_exact(&mut data_buf)?;
+            file.read_exact(&mut buf[0..4])?;
+            let checksum_stored = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+            let checksum_actual = crc32fast::hash(&data_buf);
+
+            if checksum_stored != checksum_actual {
+                return Err(anyhow::anyhow!("Checksum mismatch in manifest file"));
+            }
+
+            let record = serde_json::from_slice(&data_buf)?;
+            records.push(record);
+
+            data_buf.clear();
+        }
 
         let file = File::options().append(true).open(path)?;
         let file = Arc::new(Mutex::new(file));
@@ -59,8 +84,17 @@ impl Manifest {
     }
 
     pub fn add_record_when_init(&self, record: ManifestRecord) -> Result<()> {
+        let mut buf = vec![0; 8];
+        serde_json::to_writer(&mut buf, &record)?;
+
+        let len = buf.len() - 8;
+        buf[0..8].copy_from_slice(&len.to_le_bytes());
+
+        let checksum = crc32fast::hash(&buf[8..]);
+        buf.extend_from_slice(&checksum.to_le_bytes());
+
         let mut file = self.file.lock();
-        serde_json::to_writer(&mut *file, &record)?;
+        file.write_all(&buf)?;
         file.sync_all()?;
         Ok(())
     }

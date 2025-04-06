@@ -147,6 +147,10 @@ impl<'a> Key<&'a [u8]> {
         Key(self.0.to_vec(), self.1)
     }
 
+    pub fn to_key_bytes(self) -> KeyBytes {
+        Key(Bytes::copy_from_slice(self.0), self.1)
+    }
+
     /// Create a key slice from a slice. Will be removed in week 3.
     pub fn from_slice(slice: &'a [u8], ts: u64) -> Self {
         Self(slice, ts)

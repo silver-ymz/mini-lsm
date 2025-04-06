@@ -104,7 +104,6 @@ impl LeveledCompactionController {
         }
 
         // Decide Base Level
-        // dbg!(&target_level_size, &actual_level_size);
         if snapshot.l0_sstables.len() >= self.options.level0_file_num_compaction_trigger {
             let base_level = target_level_size.partition_point(|&size| size == 0) + 1;
             let base_level_sst_ids =

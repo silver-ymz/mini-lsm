@@ -22,6 +22,8 @@ use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
 use parking_lot::Mutex;
 
+use crate::key::{KeyBytes, KeySlice};
+
 struct WalInner {
     file: File,
     buf: Vec<u8>,
@@ -46,7 +48,7 @@ impl Wal {
         })
     }
 
-    pub fn recover(path: impl AsRef<Path>, skiplist: &SkipMap<Bytes, Bytes>) -> Result<Self> {
+    pub fn recover(path: impl AsRef<Path>, skiplist: &SkipMap<KeyBytes, Bytes>) -> Result<Self> {
         let mut file = File::open(&path)?;
         let mut buf = Vec::new();
         file.read_to_end(&mut buf)?;
@@ -64,7 +66,9 @@ impl Wal {
             let key_length = usize::from_le_bytes(*key_length_data);
             assert!(key_length > 0);
             let (key_data, remain_data) = remain_data.split_at(key_length);
-            let key = Bytes::copy_from_slice(key_data);
+            let (ts, remain_data) = remain_data.split_first_chunk::<8>().unwrap();
+            let ts = u64::from_le_bytes(*ts);
+            let key = KeyBytes::from_bytes_with_ts(Bytes::copy_from_slice(key_data), ts);
 
             let (value_length_data, remain_data) = remain_data.split_first_chunk::<8>().unwrap();
             let value_length = usize::from_le_bytes(*value_length_data);
@@ -89,12 +93,13 @@ impl Wal {
         })
     }
 
-    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+    pub fn put(&self, key: KeySlice, value: &[u8]) -> Result<()> {
         let mut inner = self.inner.lock();
         let inner = &mut *inner;
 
-        inner.buf.write_all(&key.len().to_le_bytes())?;
-        inner.buf.write_all(key)?;
+        inner.buf.write_all(&key.key_len().to_le_bytes())?;
+        inner.buf.write_all(key.key_ref())?;
+        inner.buf.write_all(&key.ts().to_le_bytes())?;
         inner.buf.write_all(&value.len().to_le_bytes())?;
         inner.buf.write_all(value)?;
 

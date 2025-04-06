@@ -330,12 +330,16 @@ impl LsmStorageInner {
     ) -> Result<Vec<Arc<SsTable>>> {
         let mut new_ssts = Vec::new();
         let mut memtable = MemTable::create(self.next_sst_id());
+        let mut prev_key = Vec::new();
         while iter.is_valid() {
-            if iter.value().is_empty() {
+            memtable.put(iter.key(), iter.value())?;
+            if prev_key == iter.key().key_ref() {
                 iter.next()?;
                 continue;
             }
-            memtable.put(iter.key().key_ref(), iter.value())?;
+
+            prev_key.clear();
+            prev_key.extend_from_slice(iter.key().key_ref());
             iter.next()?;
             if memtable.approximate_size() >= self.options.target_sst_size {
                 let sstable = self.flush_memtable(memtable)?;

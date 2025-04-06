@@ -49,17 +49,19 @@ impl BlockMeta {
         for meta in block_meta {
             buf.extend_from_slice(&meta.offset.to_le_bytes());
             buf.extend_from_slice(
-                &TryInto::<u16>::try_into(meta.first_key.len())
+                &TryInto::<u16>::try_into(meta.first_key.key_len())
                     .unwrap()
                     .to_le_bytes(),
             );
-            buf.extend_from_slice(meta.first_key.raw_ref());
+            buf.extend_from_slice(meta.first_key.key_ref());
+            buf.extend_from_slice(&meta.first_key.ts().to_le_bytes());
             buf.extend_from_slice(
-                &TryInto::<u16>::try_into(meta.last_key.len())
+                &TryInto::<u16>::try_into(meta.last_key.key_len())
                     .unwrap()
                     .to_le_bytes(),
             );
-            buf.extend_from_slice(meta.last_key.raw_ref());
+            buf.extend_from_slice(meta.last_key.key_ref());
+            buf.extend_from_slice(&meta.last_key.ts().to_le_bytes());
         }
     }
 
@@ -69,9 +71,13 @@ impl BlockMeta {
         while buf.has_remaining() {
             let offset = buf.get_u64_le() as usize;
             let first_key_len = buf.get_u16_le();
-            let first_key = Key::from_bytes(buf.copy_to_bytes(first_key_len as usize));
+            let first_key_bytes = buf.copy_to_bytes(first_key_len as usize);
+            let first_key_ts = buf.get_u64_le();
+            let first_key = Key::from_bytes_with_ts(first_key_bytes, first_key_ts);
             let last_key_len = buf.get_u16_le();
-            let last_key = Key::from_bytes(buf.copy_to_bytes(last_key_len as usize));
+            let last_key_bytes = buf.copy_to_bytes(last_key_len as usize);
+            let last_key_ts = buf.get_u64_le();
+            let last_key = Key::from_bytes_with_ts(last_key_bytes, last_key_ts);
             result.push(BlockMeta {
                 offset,
                 first_key,
@@ -164,10 +170,10 @@ impl SsTable {
 
         let first_key = block_meta
             .first()
-            .map_or(Key::from_bytes(Bytes::new()), |m| m.first_key.clone());
+            .map_or(Key::<Bytes>::new(), |m| m.first_key.clone());
         let last_key = block_meta
             .last()
-            .map_or(Key::from_bytes(Bytes::new()), |m| m.last_key.clone());
+            .map_or(Key::<Bytes>::new(), |m| m.last_key.clone());
         Ok(Self {
             file,
             block_meta,
@@ -236,10 +242,10 @@ impl SsTable {
     pub fn find_block_idx(&self, key: KeySlice) -> usize {
         let mut left = 0;
         let mut right = self.block_meta.len();
-        let x = key.raw_ref();
+        let x = key;
         while left < right {
             let mid = (left + right) / 2;
-            let key = self.block_meta[mid].first_key.raw_ref();
+            let key = self.block_meta[mid].first_key.as_key_slice();
             if key >= x {
                 right = mid;
             } else {

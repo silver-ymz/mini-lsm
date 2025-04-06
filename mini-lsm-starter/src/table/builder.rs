@@ -24,7 +24,7 @@ use bytes::Bytes;
 use super::{bloom::Bloom, BlockMeta, FileObject, SsTable};
 use crate::{
     block::BlockBuilder,
-    key::{Key, KeySlice},
+    key::{Key, KeySlice, TS_DEFAULT},
     lsm_storage::BlockCache,
 };
 
@@ -58,21 +58,21 @@ impl SsTableBuilder {
     /// Note: You should split a new block when the current block is full.(`std::mem::replace` may
     /// be helpful here)
     pub fn add(&mut self, key: KeySlice, value: &[u8]) {
-        self.key_hashes.push(farmhash::fingerprint32(key.raw_ref()));
+        self.key_hashes.push(farmhash::fingerprint32(key.key_ref()));
         if self.first_key.is_empty() {
-            self.first_key.extend_from_slice(key.raw_ref());
-            self.last_key.extend_from_slice(key.raw_ref());
+            self.first_key.extend_from_slice(key.key_ref());
+            self.last_key.extend_from_slice(key.key_ref());
         }
 
         if !self.builder.add(key, value) {
             self.split_block();
             let res = self.builder.add(key, value);
             assert!(res);
-            self.first_key.extend_from_slice(key.raw_ref());
+            self.first_key.extend_from_slice(key.key_ref());
         }
 
         self.last_key.clear();
-        self.last_key.extend_from_slice(key.raw_ref());
+        self.last_key.extend_from_slice(key.key_ref());
     }
 
     /// Get the estimated size of the SSTable.
@@ -112,11 +112,11 @@ impl SsTableBuilder {
         let first_key = self
             .meta
             .first()
-            .map_or(Key::from_bytes(Bytes::new()), |m| m.first_key.clone());
+            .map_or(Key::<Bytes>::new(), |m| m.first_key.clone());
         let last_key = self
             .meta
             .last()
-            .map_or(Key::from_bytes(Bytes::new()), |m| m.last_key.clone());
+            .map_or(Key::<Bytes>::new(), |m| m.last_key.clone());
 
         Ok(SsTable {
             file,
@@ -136,8 +136,8 @@ impl SsTableBuilder {
         let block = builder.build();
         let meta = BlockMeta {
             offset: self.data.len(),
-            first_key: Key::from_bytes(Bytes::copy_from_slice(&self.first_key)),
-            last_key: Key::from_bytes(Bytes::copy_from_slice(&self.last_key)),
+            first_key: Key::from_bytes_with_ts(Bytes::copy_from_slice(&self.first_key), TS_DEFAULT),
+            last_key: Key::from_bytes_with_ts(Bytes::copy_from_slice(&self.last_key), TS_DEFAULT),
         };
         self.meta.push(meta);
 

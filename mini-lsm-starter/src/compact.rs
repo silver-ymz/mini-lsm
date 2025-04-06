@@ -335,7 +335,7 @@ impl LsmStorageInner {
                 iter.next()?;
                 continue;
             }
-            memtable.put(iter.key().raw_ref(), iter.value())?;
+            memtable.put(iter.key().key_ref(), iter.value())?;
             iter.next()?;
             if memtable.approximate_size() >= self.options.target_sst_size {
                 let sstable = self.flush_memtable(memtable)?;

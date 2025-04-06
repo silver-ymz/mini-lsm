@@ -34,9 +34,10 @@ impl BlockIterator {
     fn new(block: Arc<Block>) -> Self {
         let (key_len, data) = block.data.split_first_chunk::<2>().unwrap();
         let key_len = u16::from_le_bytes(*key_len);
-        let (key, _) = data.split_at(key_len as usize);
-        let mut first_key = KeyVec::new();
-        first_key.set_from_slice(KeySlice::from_slice(key));
+        let (key, data) = data.split_at(key_len as usize);
+        let (ts, _) = data.split_first_chunk::<8>().unwrap();
+        let ts = u64::from_le_bytes(*ts);
+        let first_key = KeyVec::from_vec_with_ts(key.to_vec(), ts);
         Self {
             block,
             key: KeyVec::new(),
@@ -97,7 +98,7 @@ impl BlockIterator {
     pub fn seek_to_key(&mut self, key: KeySlice) {
         let mut left = 0;
         let mut right = self.block.offsets.len();
-        let x = key.raw_ref();
+        let x = key;
         while left < right {
             let mid = (left + right) / 2;
             let mut key = KeyVec::new();
@@ -111,14 +112,17 @@ impl BlockIterator {
                 let overlap_len = u16::from_le_bytes(*overlap_len);
                 let (rest_key_len, data) = data.split_first_chunk::<2>().unwrap();
                 let rest_key_len = u16::from_le_bytes(*rest_key_len);
-                let (rest_key, _) = data.split_at(rest_key_len as usize);
+                let (rest_key, data) = data.split_at(rest_key_len as usize);
+                let (ts, _) = data.split_first_chunk::<8>().unwrap();
+                let ts = u64::from_le_bytes(*ts);
                 key.set_from_slice(KeySlice::from_slice(
-                    &self.first_key.raw_ref()[..overlap_len as usize],
+                    &self.first_key.key_ref()[..overlap_len as usize],
+                    ts,
                 ));
                 key.append(rest_key);
             }
 
-            if key.raw_ref() >= x {
+            if key.as_key_slice() >= x {
                 right = mid;
             } else {
                 left = mid + 1;
@@ -138,18 +142,21 @@ impl BlockIterator {
 
         if idx == 0 {
             self.key = self.first_key.clone();
-            value_offset += 2 + self.first_key.len();
+            value_offset += 2 + 8 + self.first_key.key_len();
         } else {
             let (overlap_len, data) = data.split_first_chunk::<2>().unwrap();
             let overlap_len = u16::from_le_bytes(*overlap_len);
             let (rest_key_len, data) = data.split_first_chunk::<2>().unwrap();
             let rest_key_len = u16::from_le_bytes(*rest_key_len);
-            let (rest_key, _) = data.split_at(rest_key_len as usize);
+            let (rest_key, data) = data.split_at(rest_key_len as usize);
+            let (ts, _) = data.split_first_chunk::<8>().unwrap();
+            let ts = u64::from_le_bytes(*ts);
             self.key.set_from_slice(KeySlice::from_slice(
-                &self.first_key.raw_ref()[..overlap_len as usize],
+                &self.first_key.key_ref()[..overlap_len as usize],
+                ts,
             ));
             self.key.append(rest_key);
-            value_offset += 4 + rest_key_len as usize;
+            value_offset += 4 + 8 + rest_key_len as usize;
         }
 
         let (value_len, _) = self.block.data[value_offset..]

@@ -88,38 +88,46 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
     }
 
     fn next(&mut self) -> Result<()> {
-        let mut errs = vec![];
-        let mut current = self.current.take().unwrap();
-        let key = current.1.key().raw_ref().to_vec();
-        if let Err(e) = current.1.next() {
-            errs.push(e);
-        } else if current.1.is_valid() {
-            self.iters.push(current);
-        }
+        let current = self.current.as_mut().unwrap();
 
-        while let Some(mut p) = self.iters.peek_mut() {
-            if p.1.key().raw_ref() != key {
+        while let Some(mut peek) = self.iters.peek_mut() {
+            if current.1.key() == peek.1.key() {
+                if let e @ Err(_) = peek.1.next() {
+                    PeekMut::pop(peek);
+                    return e;
+                }
+                if !peek.1.is_valid() {
+                    PeekMut::pop(peek);
+                }
+            } else {
                 break;
             }
-            while p.1.key().raw_ref() == key {
-                if let Err(e) = p.1.next() {
-                    PeekMut::pop(p);
-                    errs.push(e);
-                    break;
-                }
-                if !p.1.is_valid() {
-                    PeekMut::pop(p);
-                    break;
-                }
+        }
+
+        if let e @ Err(_) = current.1.next() {
+            if let Some(iter) = self.iters.pop() {
+                self.current = Some(iter);
+            } else {
+                self.current = None;
+            }
+            return e;
+        }
+        if !current.1.is_valid() {
+            if let Some(iter) = self.iters.pop() {
+                self.current = Some(iter);
+            } else {
+                self.current = None;
+            }
+            return Ok(());
+        }
+
+        if let Some(mut peek) = self.iters.peek_mut() {
+            if *peek > *current {
+                std::mem::swap(&mut *peek, current);
             }
         }
 
-        self.current = self.iters.pop();
-        if errs.is_empty() {
-            Ok(())
-        } else {
-            Err(MergeIteratorError(errs).into())
-        }
+        Ok(())
     }
 
     fn num_active_iterators(&self) -> usize {
@@ -133,19 +141,3 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
         num
     }
 }
-
-#[derive(Debug)]
-struct MergeIteratorError(pub Vec<anyhow::Error>);
-
-impl std::fmt::Display for MergeIteratorError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "MergeIteratorError (size {}):", self.0.len())?;
-        for e in &self.0 {
-            e.fmt(f)?;
-            writeln!(f)?;
-        }
-        Ok(())
-    }
-}
-
-impl std::error::Error for MergeIteratorError {}

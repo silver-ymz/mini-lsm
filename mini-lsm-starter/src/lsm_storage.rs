@@ -36,7 +36,7 @@ use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
-use crate::key::Key;
+use crate::key::{Key, TS_RANGE_BEGIN};
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::{Manifest, ManifestRecord};
 use crate::mem_table::{map_bound, MemTable};
@@ -472,8 +472,11 @@ impl LsmStorageInner {
                     continue;
                 }
             }
-            let iter = SsTableIterator::create_and_seek_to_key(sst.clone(), Key::from_slice(key))?;
-            if iter.is_valid() && iter.key().raw_ref() == key {
+            let iter = SsTableIterator::create_and_seek_to_key(
+                sst.clone(),
+                Key::from_slice(key, TS_RANGE_BEGIN),
+            )?;
+            if iter.is_valid() && iter.key().key_ref() == key {
                 if iter.value().is_empty() {
                     return Ok(None);
                 }
@@ -490,9 +493,11 @@ impl LsmStorageInner {
                     .ok_or(anyhow::anyhow!("SSTable not found"))?;
                 sstables_actual.push(sst.clone());
             }
-            let iter =
-                SstConcatIterator::create_and_seek_to_key(sstables_actual, Key::from_slice(key))?;
-            if iter.is_valid() && iter.key().raw_ref() == key {
+            let iter = SstConcatIterator::create_and_seek_to_key(
+                sstables_actual,
+                Key::from_slice(key, TS_RANGE_BEGIN),
+            )?;
+            if iter.is_valid() && iter.key().key_ref() == key {
                 if iter.value().is_empty() {
                     return Ok(None);
                 }
@@ -650,13 +655,14 @@ impl LsmStorageInner {
                 continue;
             }
             let iter = match lower {
-                Bound::Included(lower) => {
-                    SsTableIterator::create_and_seek_to_key(sst.clone(), Key::from_slice(lower))?
-                }
+                Bound::Included(lower) => SsTableIterator::create_and_seek_to_key(
+                    sst.clone(),
+                    Key::from_slice(lower, TS_RANGE_BEGIN),
+                )?,
                 Bound::Excluded(lower) => {
                     let mut iter = SsTableIterator::create_and_seek_to_key(
                         sst.clone(),
-                        Key::from_slice(lower),
+                        Key::from_slice(lower, TS_RANGE_BEGIN),
                     )?;
                     if iter.is_valid() {
                         iter.next()?;
@@ -687,12 +693,12 @@ impl LsmStorageInner {
             let iter = match lower {
                 Bound::Included(lower) => SstConcatIterator::create_and_seek_to_key(
                     sstables_actual,
-                    Key::from_slice(lower),
+                    Key::from_slice(lower, TS_RANGE_BEGIN),
                 )?,
                 Bound::Excluded(lower) => {
                     let mut iter = SstConcatIterator::create_and_seek_to_key(
                         sstables_actual,
-                        Key::from_slice(lower),
+                        Key::from_slice(lower, TS_RANGE_BEGIN),
                     )?;
                     if iter.is_valid() {
                         iter.next()?;
@@ -719,16 +725,16 @@ impl LsmStorageInner {
 
 fn range_overlap(sst: &SsTable, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> bool {
     (match lower {
-        Bound::Included(lower) => sst.last_key().raw_ref() >= lower,
-        Bound::Excluded(lower) => sst.last_key().raw_ref() > lower,
+        Bound::Included(lower) => sst.last_key().key_ref() >= lower,
+        Bound::Excluded(lower) => sst.last_key().key_ref() > lower,
         Bound::Unbounded => true,
     }) && (match upper {
-        Bound::Included(upper) => sst.first_key().raw_ref() <= upper,
-        Bound::Excluded(upper) => sst.first_key().raw_ref() < upper,
+        Bound::Included(upper) => sst.first_key().key_ref() <= upper,
+        Bound::Excluded(upper) => sst.first_key().key_ref() < upper,
         Bound::Unbounded => true,
     })
 }
 
 fn key_within(sst: &SsTable, key: &[u8]) -> bool {
-    sst.first_key().raw_ref() <= key && sst.last_key().raw_ref() >= key
+    sst.first_key().key_ref() <= key && sst.last_key().key_ref() >= key
 }

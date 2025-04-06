@@ -43,26 +43,30 @@ impl BlockBuilder {
         if self.offsets.len() == 1 {
             // first key
             self.first_key.set_from_slice(key);
-            let len: u16 = (key.len() + value.len() + 4).try_into().unwrap();
+            let len: u16 = (key.key_len() + 8 + value.len() + 4).try_into().unwrap();
             let next_offset = self.offsets.last().unwrap() + len;
             self.offsets.push(next_offset);
-            self.data
-                .extend_from_slice(&TryInto::<u16>::try_into(key.len()).unwrap().to_le_bytes());
-            self.data.extend_from_slice(key.raw_ref());
+            self.data.extend_from_slice(
+                &TryInto::<u16>::try_into(key.key_len())
+                    .unwrap()
+                    .to_le_bytes(),
+            );
+            self.data.extend_from_slice(key.key_ref());
+            self.data.extend_from_slice(&key.ts().to_le_bytes());
             self.data
                 .extend_from_slice(&TryInto::<u16>::try_into(value.len()).unwrap().to_le_bytes());
             self.data.extend_from_slice(value);
         } else {
             // rest key
             let mut overlap_len = 0;
-            while overlap_len < self.first_key.len() && overlap_len < key.len() {
-                if self.first_key.raw_ref()[overlap_len] != key.raw_ref()[overlap_len] {
+            while overlap_len < self.first_key.key_len() && overlap_len < key.key_len() {
+                if self.first_key.key_ref()[overlap_len] != key.key_ref()[overlap_len] {
                     break;
                 }
                 overlap_len += 1;
             }
-            let rest_key_len = key.len() - overlap_len;
-            let len: u16 = (rest_key_len + value.len() + 6).try_into().unwrap();
+            let rest_key_len = key.key_len() - overlap_len;
+            let len: u16 = (rest_key_len + value.len() + 6 + 8).try_into().unwrap();
             let next_offset = self.offsets.last().unwrap() + len;
             if next_offset as usize + 2 * self.offsets.len() > self.block_size {
                 return false;
@@ -75,7 +79,8 @@ impl BlockBuilder {
                     .unwrap()
                     .to_le_bytes(),
             );
-            self.data.extend_from_slice(&key.raw_ref()[overlap_len..]);
+            self.data.extend_from_slice(&key.key_ref()[overlap_len..]);
+            self.data.extend_from_slice(&key.ts().to_le_bytes());
             self.data
                 .extend_from_slice(&TryInto::<u16>::try_into(value.len()).unwrap().to_le_bytes());
             self.data.extend_from_slice(value);

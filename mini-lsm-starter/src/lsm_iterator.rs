@@ -54,14 +54,14 @@ impl StorageIterator for LsmIterator {
     fn is_valid(&self) -> bool {
         self.inner.is_valid()
             && match &self.upper_bound {
-                Bound::Included(key) => self.inner.key().raw_ref() <= key.as_ref(),
-                Bound::Excluded(key) => self.inner.key().raw_ref() < key.as_ref(),
+                Bound::Included(key) => self.inner.key().key_ref() <= key,
+                Bound::Excluded(key) => self.inner.key().key_ref() < key,
                 Bound::Unbounded => true,
             }
     }
 
     fn key(&self) -> &[u8] {
-        self.inner.key().raw_ref()
+        self.inner.key().key_ref()
     }
 
     fn value(&self) -> &[u8] {

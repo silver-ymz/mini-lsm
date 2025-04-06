@@ -28,7 +28,7 @@ fn test_task3_compaction_integration() {
     let mut options = LsmStorageOptions::default_for_week2_test(CompactionOptions::NoCompaction);
     options.enable_wal = true;
     let storage = MiniLsm::open(&dir, options.clone()).unwrap();
-    storage.new_txn().unwrap();
+    let _txn = storage.new_txn().unwrap();
     for i in 0..=20000 {
         storage
             .put(b"0", format!("{:02000}", i).as_bytes())

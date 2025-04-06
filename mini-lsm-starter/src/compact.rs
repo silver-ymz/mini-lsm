@@ -50,7 +50,6 @@ pub enum CompactionTask {
 }
 
 impl CompactionTask {
-    #[allow(unused)]
     fn compact_to_bottom_level(&self) -> bool {
         match self {
             CompactionTask::ForceFullCompaction { .. } => true,
@@ -131,6 +130,7 @@ pub enum CompactionOptions {
 impl LsmStorageInner {
     fn compact(&self, task: &CompactionTask) -> Result<Vec<Arc<SsTable>>> {
         let state = self.state.read().clone();
+        let bottom_level = task.compact_to_bottom_level();
         match task {
             CompactionTask::Leveled(task) => {
                 let upper_level_iter = if task.upper_level.is_none() {
@@ -142,7 +142,7 @@ impl LsmStorageInner {
                 };
                 let lower_level_iter = sstable_concat_iter(&state, &task.lower_level_sst_ids)?;
                 let iter = TwoMergeIterator::create(upper_level_iter, lower_level_iter)?;
-                self.compact_iterator(iter)
+                self.compact_iterator(iter, bottom_level)
             }
             CompactionTask::Tiered(task) => {
                 let mut iters = Vec::new();
@@ -151,7 +151,7 @@ impl LsmStorageInner {
                     iters.push(Box::new(iter));
                 }
                 let iter = MergeIterator::create(iters);
-                self.compact_iterator(iter)
+                self.compact_iterator(iter, bottom_level)
             }
             CompactionTask::Simple(task) => {
                 let upper_level_iter = if task.upper_level.is_none() {
@@ -163,7 +163,7 @@ impl LsmStorageInner {
                 };
                 let lower_level_iter = sstable_concat_iter(&state, &task.lower_level_sst_ids)?;
                 let iter = TwoMergeIterator::create(upper_level_iter, lower_level_iter)?;
-                self.compact_iterator(iter)
+                self.compact_iterator(iter, bottom_level)
             }
             CompactionTask::ForceFullCompaction {
                 l0_sstables,
@@ -173,7 +173,7 @@ impl LsmStorageInner {
                     sstable_merge_iter(&state, l0_sstables)?,
                     sstable_concat_iter(&state, l1_sstables)?,
                 )?;
-                self.compact_iterator(iter)
+                self.compact_iterator(iter, bottom_level)
             }
         }
     }
@@ -327,20 +327,30 @@ impl LsmStorageInner {
     fn compact_iterator<I: for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>>(
         &self,
         mut iter: I,
+        bottom_level: bool,
     ) -> Result<Vec<Arc<SsTable>>> {
+        let watermark = dbg!(self.mvcc().watermark());
         let mut new_ssts = Vec::new();
         let mut memtable = MemTable::create(self.next_sst_id());
-        let mut prev_key = Vec::new();
         while iter.is_valid() {
-            memtable.put(iter.key(), iter.value())?;
-            if prev_key == iter.key().key_ref() {
+            let key = iter.key().key_ref().to_vec();
+
+            while iter.is_valid() && iter.key().key_ref() == key && iter.key().ts() > watermark {
+                memtable.put(iter.key(), iter.value())?;
                 iter.next()?;
-                continue;
             }
 
-            prev_key.clear();
-            prev_key.extend_from_slice(iter.key().key_ref());
-            iter.next()?;
+            let mut stored = false;
+            while iter.is_valid() && iter.key().key_ref() == key {
+                if !stored {
+                    if !bottom_level || !iter.value().is_empty() {
+                        memtable.put(iter.key(), iter.value())?;
+                    }
+                    stored = true;
+                }
+                iter.next()?;
+            }
+
             if memtable.approximate_size() >= self.options.target_sst_size {
                 let sstable = self.flush_memtable(memtable)?;
                 new_ssts.push(sstable);

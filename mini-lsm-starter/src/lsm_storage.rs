@@ -409,7 +409,7 @@ impl LsmStorageInner {
             }
         }
 
-        self.mvcc.update_commit_ts(max_ts);
+        self.mvcc().update_commit_ts(max_ts);
         *guard = Arc::new(state);
         Ok(())
     }
@@ -427,6 +427,10 @@ impl LsmStorageInner {
         Ok(())
     }
 
+    pub fn mvcc(&self) -> &LsmMvccInner {
+        &self.mvcc
+    }
+
     pub fn sync(&self) -> Result<()> {
         let state = self.state.read();
         state.memtable.sync_wal()?;
@@ -439,7 +443,7 @@ impl LsmStorageInner {
     }
 
     pub fn get(self: &Arc<Self>, key: &[u8]) -> Result<Option<Bytes>> {
-        let txn = self.mvcc.new_txn(self.clone(), false);
+        let txn = self.mvcc().new_txn(self.clone(), false);
         txn.get(key)
     }
 
@@ -525,8 +529,8 @@ impl LsmStorageInner {
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
     pub fn write_batch<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<()> {
-        let _write_lock = self.mvcc.write_lock.lock();
-        let ts = self.mvcc.latest_commit_ts() + 1;
+        let _write_lock = self.mvcc().write_lock.lock();
+        let ts = self.mvcc().latest_commit_ts() + 1;
 
         for record in batch {
             let (key, value) = match record {
@@ -551,7 +555,7 @@ impl LsmStorageInner {
             }
         }
 
-        self.mvcc.update_commit_ts(ts);
+        self.mvcc().update_commit_ts(ts);
         Ok(())
     }
 
@@ -651,12 +655,12 @@ impl LsmStorageInner {
     }
 
     pub fn new_txn(self: &Arc<Self>) -> Result<Arc<Transaction>> {
-        Ok(self.mvcc.new_txn(self.clone(), false))
+        Ok(self.mvcc().new_txn(self.clone(), self.options.serializable))
     }
 
     /// Create an iterator over a range of keys.
     pub fn scan(self: &Arc<Self>, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> Result<TxnIterator> {
-        let txn = self.mvcc.new_txn(self.clone(), false);
+        let txn = self.mvcc().new_txn(self.clone(), false);
         txn.scan(lower, upper)
     }
 

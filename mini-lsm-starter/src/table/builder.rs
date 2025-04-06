@@ -37,6 +37,7 @@ pub struct SsTableBuilder {
     pub(crate) meta: Vec<BlockMeta>,
     key_hashes: Vec<u32>,
     block_size: usize,
+    max_ts: u64,
 }
 
 impl SsTableBuilder {
@@ -50,6 +51,7 @@ impl SsTableBuilder {
             meta: Vec::new(),
             key_hashes: Vec::new(),
             block_size,
+            max_ts: 0,
         }
     }
 
@@ -73,6 +75,7 @@ impl SsTableBuilder {
 
         self.last_key.clear();
         self.last_key.extend_from_slice(key.key_ref());
+        self.max_ts = self.max_ts.max(key.ts());
     }
 
     /// Get the estimated size of the SSTable.
@@ -99,6 +102,8 @@ impl SsTableBuilder {
         let meta_checksum = crc32fast::hash(&data[block_meta_offset..]);
         data.extend_from_slice(&meta_checksum.to_le_bytes());
         data.extend_from_slice(&block_meta_offset.to_le_bytes());
+
+        data.extend_from_slice(&self.max_ts.to_le_bytes());
 
         let bloom_offset = data.len();
         let bloom_bits = Bloom::bloom_bits_per_key(self.key_hashes.len(), 0.01);
@@ -127,7 +132,7 @@ impl SsTableBuilder {
             first_key,
             last_key,
             bloom: Some(bloom),
-            max_ts: 0,
+            max_ts: self.max_ts,
         })
     }
 

@@ -35,24 +35,42 @@ pub struct LsmIterator {
     inner: LsmIteratorInner,
     prev_key: Vec<u8>,
     upper_bound: Bound<Bytes>,
+    read_ts: u64,
 }
 
 impl LsmIterator {
-    pub(crate) fn new(iter: LsmIteratorInner, upper_bound: Bound<Bytes>) -> Result<Self> {
-        let prev_key = if iter.is_valid() {
-            iter.key().key_ref().to_vec()
-        } else {
-            Vec::new()
-        };
+    pub(crate) fn new(
+        iter: LsmIteratorInner,
+        upper_bound: Bound<Bytes>,
+        read_ts: u64,
+    ) -> Result<Self> {
         let mut this = Self {
             inner: iter,
-            prev_key,
+            prev_key: Vec::new(),
             upper_bound,
+            read_ts,
         };
-        if this.inner.is_valid() && this.inner.value().is_empty() {
-            this.next()?;
+
+        this.skip()?;
+        if this.inner.is_valid() {
+            this.prev_key.extend_from_slice(this.inner.key().key_ref());
+            if this.inner.value().is_empty() {
+                this.next()?;
+            }
         }
+
         Ok(this)
+    }
+
+    fn skip(&mut self) -> Result<()> {
+        let key = self.prev_key.as_slice();
+        while self.inner.is_valid()
+            && (self.inner.key().key_ref() == key || self.inner.key().ts() > self.read_ts)
+        {
+            self.inner.next()?
+        }
+
+        Ok(())
     }
 }
 
@@ -77,10 +95,7 @@ impl StorageIterator for LsmIterator {
     }
 
     fn next(&mut self) -> Result<()> {
-        self.inner.next()?;
-        while self.inner.is_valid() && self.inner.key().key_ref() == self.prev_key {
-            self.inner.next()?;
-        }
+        self.skip()?;
 
         if self.inner.is_valid() {
             self.prev_key.clear();

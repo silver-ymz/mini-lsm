@@ -157,9 +157,12 @@ impl SsTable {
         }
         let bloom = Bloom::decode(bloom_data)?;
 
+        let max_ts = u64::from_le_bytes(file.read(bloom_offset - 8, 8)?.as_slice().try_into()?);
+
         let block_meta_offset =
-            usize::from_le_bytes(file.read(bloom_offset - 8, 8)?.as_slice().try_into()?) as u64;
-        let block_meta_data = file.read(block_meta_offset, bloom_offset - block_meta_offset - 8)?;
+            usize::from_le_bytes(file.read(bloom_offset - 16, 8)?.as_slice().try_into()?) as u64;
+        let block_meta_data =
+            file.read(block_meta_offset, bloom_offset - block_meta_offset - 16)?;
         let (block_meta_data, checksum_data) = block_meta_data.split_last_chunk::<4>().unwrap();
         let checksum_stored = u32::from_le_bytes(*checksum_data);
         let checksum_actual = crc32fast::hash(block_meta_data);
@@ -183,7 +186,7 @@ impl SsTable {
             first_key,
             last_key,
             bloom: Some(bloom),
-            max_ts: 0,
+            max_ts,
         })
     }
 

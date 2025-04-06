@@ -44,11 +44,23 @@ pub struct Transaction {
 
 impl Transaction {
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
-        unimplemented!()
+        self.inner.get_with_ts(key, self.read_ts)
     }
 
     pub fn scan(self: &Arc<Self>, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> Result<TxnIterator> {
-        unimplemented!()
+        let local_iter = TxnLocalIterator::new(
+            self.local_storage.clone(),
+            |local_storage| {
+                let lower = lower.map(Bytes::copy_from_slice);
+                let upper = upper.map(Bytes::copy_from_slice);
+                local_storage.range((lower, upper))
+            },
+            (Bytes::new(), Bytes::new()),
+        );
+        let lsm_iter = self.inner.scan_with_ts(lower, upper, self.read_ts)?;
+        let iter = TwoMergeIterator::create(local_iter, lsm_iter)?;
+
+        TxnIterator::create(self.clone(), iter)
     }
 
     pub fn put(&self, key: &[u8], value: &[u8]) {
@@ -87,19 +99,26 @@ impl StorageIterator for TxnLocalIterator {
     type KeyType<'a> = &'a [u8];
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        &self.borrow_item().1
     }
 
     fn key(&self) -> &[u8] {
-        unimplemented!()
+        self.borrow_item().0.as_ref()
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        !self.borrow_item().0.is_empty()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        self.with_mut(|this| {
+            if let Some(entry) = this.iter.next() {
+                *this.item = (entry.key().clone(), entry.value().clone());
+            } else {
+                *this.item = Default::default();
+            }
+        });
+        Ok(())
     }
 }
 
@@ -113,7 +132,7 @@ impl TxnIterator {
         txn: Arc<Transaction>,
         iter: TwoMergeIterator<TxnLocalIterator, FusedIterator<LsmIterator>>,
     ) -> Result<Self> {
-        unimplemented!()
+        Ok(TxnIterator { _txn: txn, iter })
     }
 }
 
@@ -136,7 +155,8 @@ impl StorageIterator for TxnIterator {
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        self.iter.next()?;
+        Ok(())
     }
 
     fn num_active_iterators(&self) -> usize {

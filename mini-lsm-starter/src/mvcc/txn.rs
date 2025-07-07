@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use std::{
     collections::HashSet,
     ops::Bound,
-    sync::{atomic::AtomicBool, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 use anyhow::Result;
@@ -30,7 +30,7 @@ use parking_lot::Mutex;
 use crate::{
     iterators::{two_merge_iterator::TwoMergeIterator, StorageIterator},
     lsm_iterator::{FusedIterator, LsmIterator},
-    lsm_storage::LsmStorageInner,
+    lsm_storage::{LsmStorageInner, WriteBatchRecord},
 };
 
 pub struct Transaction {
@@ -44,18 +44,32 @@ pub struct Transaction {
 
 impl Transaction {
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
+        let commited = self.committed.load(Ordering::Acquire);
+        if commited {
+            return Err(anyhow::anyhow!("Transaction has been committed"));
+        }
+
+        if let Some(local_value) = self.local_storage.get(key) {
+            let local_value = local_value.value();
+            if !local_value.is_empty() {
+                return Ok(Some(local_value.clone()));
+            } else {
+                return Ok(None);
+            }
+        }
         self.inner.get_with_ts(key, self.read_ts)
     }
 
     pub fn scan(self: &Arc<Self>, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> Result<TxnIterator> {
-        let local_iter = TxnLocalIterator::new(
+        let commited = self.committed.load(Ordering::Acquire);
+        if commited {
+            return Err(anyhow::anyhow!("Transaction has been committed"));
+        }
+
+        let local_iter = TxnLocalIterator::create(
             self.local_storage.clone(),
-            |local_storage| {
-                let lower = lower.map(Bytes::copy_from_slice);
-                let upper = upper.map(Bytes::copy_from_slice);
-                local_storage.range((lower, upper))
-            },
-            (Bytes::new(), Bytes::new()),
+            lower.map(Bytes::copy_from_slice),
+            upper.map(Bytes::copy_from_slice),
         );
         let lsm_iter = self.inner.scan_with_ts(lower, upper, self.read_ts)?;
         let iter = TwoMergeIterator::create(local_iter, lsm_iter)?;
@@ -64,15 +78,42 @@ impl Transaction {
     }
 
     pub fn put(&self, key: &[u8], value: &[u8]) {
-        unimplemented!()
+        let commited = self.committed.load(Ordering::Acquire);
+        if commited {
+            panic!("Transaction has been committed");
+        }
+
+        let key = Bytes::copy_from_slice(key);
+        let value = Bytes::copy_from_slice(value);
+        self.local_storage.insert(key, value);
     }
 
     pub fn delete(&self, key: &[u8]) {
-        unimplemented!()
+        let commited = self.committed.load(Ordering::Acquire);
+        if commited {
+            panic!("Transaction has been committed");
+        }
+
+        let key = Bytes::copy_from_slice(key);
+        self.local_storage.insert(key, Bytes::new());
     }
 
     pub fn commit(&self) -> Result<()> {
-        unimplemented!()
+        self.committed.store(true, Ordering::Release);
+
+        let mut batch = Vec::new();
+        for entry in self.local_storage.iter() {
+            let key = entry.key().clone();
+            let value = entry.value().clone();
+            if value.is_empty() {
+                batch.push(WriteBatchRecord::Del(key));
+            } else {
+                batch.push(WriteBatchRecord::Put(key, value));
+            }
+        }
+        self.inner.write_batch(&batch)?;
+
+        Ok(())
     }
 }
 
@@ -96,6 +137,18 @@ pub struct TxnLocalIterator {
     iter: SkipMapRangeIter<'this>,
     /// Stores the current key-value pair.
     item: (Bytes, Bytes),
+}
+
+impl TxnLocalIterator {
+    fn create(map: Arc<SkipMap<Bytes, Bytes>>, lower: Bound<Bytes>, upper: Bound<Bytes>) -> Self {
+        let mut iter = TxnLocalIterator::new(
+            map,
+            |map| map.range((lower, upper)),
+            (Bytes::new(), Bytes::new()),
+        );
+        iter.next().unwrap();
+        iter
+    }
 }
 
 impl StorageIterator for TxnLocalIterator {
@@ -159,6 +212,9 @@ impl StorageIterator for TxnIterator {
 
     fn next(&mut self) -> Result<()> {
         self.iter.next()?;
+        while self.iter.is_valid() && self.iter.value().is_empty() {
+            self.iter.next()?;
+        }
         Ok(())
     }
 

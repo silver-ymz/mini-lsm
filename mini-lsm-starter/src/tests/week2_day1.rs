@@ -33,7 +33,6 @@ fn test_task1_full_compaction() {
     let dir = tempdir().unwrap();
     let storage =
         Arc::new(LsmStorageInner::open(&dir, LsmStorageOptions::default_for_week1_test()).unwrap());
-    #[allow(clippy::let_unit_value)]
     let _txn = storage.new_txn().unwrap();
     storage.put(b"0", b"v1").unwrap();
     sync(&storage);

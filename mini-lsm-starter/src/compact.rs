@@ -33,7 +33,7 @@ use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
 use crate::key::KeySlice;
-use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
+use crate::lsm_storage::{CompactionFilter, LsmStorageInner, LsmStorageState};
 use crate::manifest::ManifestRecord;
 use crate::mem_table::MemTable;
 use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
@@ -329,7 +329,10 @@ impl LsmStorageInner {
         mut iter: I,
         bottom_level: bool,
     ) -> Result<Vec<Arc<SsTable>>> {
-        let watermark = dbg!(self.mvcc().watermark());
+        let compaction_filters_guard = self.compaction_filters.lock();
+        let filters = &compaction_filters_guard[..];
+
+        let watermark = self.mvcc().watermark();
         let mut new_ssts = Vec::new();
         let mut memtable = MemTable::create(self.next_sst_id());
         while iter.is_valid() {
@@ -340,15 +343,20 @@ impl LsmStorageInner {
                 iter.next()?;
             }
 
-            let mut stored = false;
-            while iter.is_valid() && iter.key().key_ref() == key {
-                if !stored {
-                    if !bottom_level || !iter.value().is_empty() {
-                        memtable.put(iter.key(), iter.value())?;
+            if iter.is_valid() && iter.key().key_ref() == key {
+                let mut skip = false;
+                for CompactionFilter::Prefix(prefix) in filters {
+                    if key.starts_with(prefix) {
+                        skip = true;
+                        break;
                     }
-                    stored = true;
                 }
-                iter.next()?;
+                if !skip && (!bottom_level || !iter.value().is_empty()) {
+                    memtable.put(iter.key(), iter.value())?;
+                }
+                while iter.is_valid() && iter.key().key_ref() == key {
+                    iter.next()?;
+                }
             }
 
             if memtable.approximate_size() >= self.options.target_sst_size {

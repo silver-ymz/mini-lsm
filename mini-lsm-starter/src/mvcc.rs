@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 pub mod txn;
 pub mod watermark;
 
@@ -76,12 +73,19 @@ impl LsmMvccInner {
             guard.1.add_reader(ts);
             ts
         };
+
+        let key_hashes = if inner.options.serializable {
+            Some(Mutex::new((HashSet::new(), HashSet::new())))
+        } else {
+            None
+        };
+
         Arc::new(Transaction {
             read_ts: ts,
             inner: inner.clone(),
             local_storage: Arc::new(SkipMap::new()),
             committed: Arc::new(AtomicBool::new(false)),
-            key_hashes: None,
+            key_hashes,
         })
     }
 }

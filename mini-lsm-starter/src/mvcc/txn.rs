@@ -49,6 +49,11 @@ impl Transaction {
             return Err(anyhow::anyhow!("Transaction has been committed"));
         }
 
+        if let Some(key_hashes) = &self.key_hashes {
+            let mut guard = key_hashes.lock();
+            guard.1.insert(crc32fast::hash(key));
+        }
+
         if let Some(local_value) = self.local_storage.get(key) {
             let local_value = local_value.value();
             if !local_value.is_empty() {
@@ -83,6 +88,11 @@ impl Transaction {
             panic!("Transaction has been committed");
         }
 
+        if let Some(key_hashes) = &self.key_hashes {
+            let mut guard = key_hashes.lock();
+            guard.0.insert(crc32fast::hash(key));
+        }
+
         let key = Bytes::copy_from_slice(key);
         let value = Bytes::copy_from_slice(value);
         self.local_storage.insert(key, value);
@@ -94,12 +104,41 @@ impl Transaction {
             panic!("Transaction has been committed");
         }
 
+        if let Some(key_hashes) = &self.key_hashes {
+            let mut guard = key_hashes.lock();
+            guard.0.insert(crc32fast::hash(key));
+        }
+
         let key = Bytes::copy_from_slice(key);
         self.local_storage.insert(key, Bytes::new());
     }
 
     pub fn commit(&self) -> Result<()> {
         self.committed.store(true, Ordering::Release);
+
+        let mvcc = self.inner.mvcc();
+        let _commit_guard = mvcc.commit_lock.lock();
+
+        if let Some(key_hashes) = &self.key_hashes {
+            let key_hashes_guard = key_hashes.lock();
+            let write_set = &key_hashes_guard.0;
+            if !write_set.is_empty() {
+                let committed_txns_guard = mvcc.committed_txns.lock();
+                let range_start = self.read_ts.checked_add(1).unwrap();
+                for (_, txn) in committed_txns_guard.range(range_start..) {
+                    if txn.key_hashes.is_disjoint(write_set) {
+                        continue;
+                    }
+                    return Err(anyhow::anyhow!(
+                        "Transaction (read_ts {}) conflicts with committed transaction (commit_ts {}), write_set for pending txn: {:?}, read_set for commited txn: {:?}",
+                        self.read_ts,
+                        txn.commit_ts,
+                        write_set,
+                        txn.key_hashes
+                    ));
+                }
+            }
+        }
 
         let mut batch = Vec::new();
         for entry in self.local_storage.iter() {
@@ -112,6 +151,22 @@ impl Transaction {
             }
         }
         self.inner.write_batch(&batch)?;
+
+        if let Some(key_hashes) = &self.key_hashes {
+            let key_hashes_guard = key_hashes.lock();
+            let read_set = &key_hashes_guard.1;
+            if !read_set.is_empty() {
+                let commit_ts = mvcc.latest_commit_ts();
+                mvcc.committed_txns.lock().insert(
+                    commit_ts,
+                    crate::mvcc::CommittedTxnData {
+                        key_hashes: read_set.clone(),
+                        read_ts: self.read_ts,
+                        commit_ts,
+                    },
+                );
+            }
+        }
 
         Ok(())
     }
